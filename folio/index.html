@@ -9,14 +9,24 @@
     <meta name="apple-mobile-web-app-title" content="Folio" />
     <title>Folio</title>
     <style>
-      html, body, #root {
-        margin: 0;
-        padding: 0;
+      *, *::before, *::after { box-sizing: border-box; }
+      html {
+        margin: 0; padding: 0;
+        width: 100%; height: 100%;
         background: #06080F;
-        min-height: 100%;
+        -webkit-text-size-adjust: 100%;
       }
-      html { -webkit-text-size-adjust: 100%; }
-      body { overflow-x: hidden; }
+      body {
+        margin: 0; padding: 0;
+        width: 100%; min-height: 100%;
+        background: #06080F;
+        overflow-x: hidden;
+      }
+      #root {
+        margin: 0; padding: 0;
+        width: 100%; min-height: 100vh;
+        background: #06080F;
+      }
     </style>
   </head>
   <body>
