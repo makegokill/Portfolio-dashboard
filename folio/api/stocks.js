@@ -1,4 +1,3 @@
-api/stocks.js
 // Vercel Serverless Function — Thai Stock Prices via Yahoo Finance
 // GET /api/stocks → returns latest THB prices for SET stocks
 
