@@ -1,7 +1,7 @@
 // Vercel Serverless Function — Thai Stock Prices via Yahoo Finance
 // GET /api/stocks → returns latest THB prices for SET stocks
 
-const SYMBOLS = ["CPAXT.BK", "JCK.BK", "KEX.BK", "SCGP.BK", "TRUE.BK"];
+const SYMBOLS = ["CPAXT.BK", "JCK.BK", "KEX.BK", "SCGP.BK", "TRUE.BK", "DELTA.BK"];
 
 export default async function handler(req, res) {
   // CORS — allow your Vercel app to call this
