@@ -121,7 +121,7 @@ export default function App() {
 
   // SET stock prices — keyed by ticker (THB), seeded with last known prices
   const [setP, setSetP] = useState({ CPAXT: 15.20, JCK: 0.13, KEX: null, SCGP: 23.60, TRUE: 13.80, DELTA: 237.50 });
-  const [setStocksUpdatedAt, setStocksUpdatedAt2] = useState(null);
+  const [stocksUpdatedAt, setStocksUpdatedAt] = useState(null);
   const [setMode, setSetMode] = useState("idle");
 
   const isBangkokTradingHours = () => {
@@ -143,7 +143,7 @@ export default function App() {
           Object.entries(d.prices).forEach(([sym, v]) => { if (v.price !== null) next[sym] = v.price; });
           return next;
         });
-        setSetMode("live"); setStocksUpdatedAt2(new Date());
+        setSetMode("live"); setStocksUpdatedAt(new Date());
       } else throw new Error(d.error || "no data");
     } catch (e) { setSetMode("offline"); }
   };
@@ -366,7 +366,7 @@ export default function App() {
           )}
         </div>
 
-        <div className="footer">USD · ฿THB at {rate} · crypto &amp; gold live via CoinGecko · SET stocks via Yahoo Finance ({setMode === "live" ? `updated ${setStocksUpdatedAt2?.toLocaleTimeString()}` : setMode === "offline" ? "offline · using last known prices" : "loading"}) · ETF at last NAV · {updatedAt ? `crypto updated ${updatedAt.toLocaleTimeString()}` : "loading"}</div>
+        <div className="footer">USD · ฿THB at {rate} · crypto &amp; gold live via CoinGecko · SET stocks via Yahoo Finance ({setMode === "live" ? `updated ${stocksUpdatedAt?.toLocaleTimeString()}` : setMode === "offline" ? "offline · using last known prices" : "loading"}) · ETF at last NAV · {updatedAt ? `crypto updated ${updatedAt.toLocaleTimeString()}` : "loading"}</div>
       </div>
     </div>
   );
