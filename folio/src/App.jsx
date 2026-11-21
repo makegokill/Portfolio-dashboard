@@ -269,6 +269,47 @@ export default function App() {
   const selectAll = (e) => e.target.select();
   const resetData = () => { if (typeof window !== "undefined" && window.confirm("Reset all holdings to the latest data set? This replaces what's saved on this device.")) setHoldings(SEED_HOLDINGS); };
 
+  // ── Backup: export holdings to a .json file / import one back ──
+  const exportBackup = () => {
+    try {
+      const payload = JSON.stringify({ app: "folio", version: 7, exportedAt: new Date().toISOString(), rate, holdings }, null, 2);
+      const blob = new Blob([payload], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const d = new Date();
+      const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      a.href = url;
+      a.download = `folio-backup-${stamp}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    } catch (err) {
+      window.alert("Couldn't create the backup file: " + err.message);
+    }
+  };
+  const importBackup = (file) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onerror = () => window.alert("Couldn't read that file.");
+    reader.onload = () => {
+      try {
+        const d = JSON.parse(String(reader.result));
+        if (!d || !Array.isArray(d.holdings) || d.holdings.length === 0) throw new Error("This isn't a Folio backup (no holdings found).");
+        const ok = d.holdings.every((h) => h && typeof h === "object" && h.id && h.name && h.group);
+        if (!ok) throw new Error("Some holdings in this file are malformed.");
+        const when = d.exportedAt ? new Date(d.exportedAt).toLocaleString() : "unknown date";
+        if (!window.confirm(`Restore backup from ${when} (${d.holdings.length} holdings)? This replaces what's saved on this device.`)) return;
+        setHoldings(d.holdings);
+        if (typeof d.rate === "number" && d.rate > 0) { setRate(d.rate); fxLocked.current = true; }
+        window.alert("Backup restored.");
+      } catch (err) {
+        window.alert("Import failed: " + err.message);
+      }
+    };
+    reader.readAsText(file);
+  };
+
   const TABS = [
     { k: "allocation", label: "Allocation",   Icon: PieIcon },
     { k: "pnl",        label: "Profit & Loss", Icon: TableIcon },
@@ -362,7 +403,7 @@ export default function App() {
           {tab === "edit" && (
             <EditHoldings holdings={holdings} expanded={expanded} setExpanded={setExpanded}
               update={update} remove={remove} addHolding={addHolding} resetData={resetData}
-              num={num} selectAll={selectAll} prices={prices} rate={rate} fthb={fthb} setP={setP} />
+              exportBackup={exportBackup} importBackup={importBackup} num={num} selectAll={selectAll} prices={prices} rate={rate} fthb={fthb} setP={setP} />
           )}
         </div>
 
@@ -608,8 +649,9 @@ function PnLTable({ groups, grand, hov, onHov }) {
   );
 }
 
-function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHolding, resetData, num, selectAll, prices, rate, fthb, setP }) {
+function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHolding, resetData, exportBackup, importBackup, num, selectAll, prices, rate, fthb, setP }) {
   const [showAdd, setShowAdd] = React.useState(false);
+  const fileRef = React.useRef(null);
   return (
     <div className="card" style={{ padding: 22 }}>
       <div className="edit-hdr">
@@ -617,7 +659,11 @@ function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHold
           <div className="edit-title">Holdings</div>
           <div className="edit-sub">Click a category to expand and edit</div>
         </div>
-        <div style={{ display: "flex", gap: 8, position: "relative" }}>
+        <div style={{ display: "flex", gap: 8, position: "relative", flexWrap: "wrap" }}>
+          <input ref={fileRef} type="file" accept="application/json,.json" style={{ display: "none" }}
+            onChange={(e) => { importBackup(e.target.files && e.target.files[0]); e.target.value = ""; }} />
+          <button className="btn-ghost" onClick={exportBackup}><DownloadIcon /> Export backup</button>
+          <button className="btn-ghost" onClick={() => fileRef.current && fileRef.current.click()}><UploadIcon /> Import backup</button>
           <button className="btn-ghost" onClick={resetData}><RefreshIcon /> Reset data</button>
           <button className="btn-accent" onClick={() => setShowAdd((s) => !s)}><PlusIcon /> Add asset</button>
           {showAdd && (
@@ -756,6 +802,8 @@ const TableIcon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="no
 const GearIcon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>;
 const PlusIcon = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>;
 const TrashIcon = () => <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>;
+const DownloadIcon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>;
+const UploadIcon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>;
 const RefreshIcon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></svg>;
 
 const CSS = `
