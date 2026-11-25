@@ -1,26 +1,26 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 
 /* ════════════════════════════════════════════════════════════
-   FOLIO — Portfolio Dashboard
-   Design: Folio (Claude Design)  ·  Engine: live prices + storage
+   FOLIO — Portfolio dashboard, made for iPhone first
+   Light "passbook" design · live prices · saved on this device
 ════════════════════════════════════════════════════════════ */
 
 const ORDER = ["BTC", "Crypto", "Trading", "Gold", "ETF", "Stocks"];
 const GROUPS_META = {
   BTC:     { label: "Bitcoin", color: "#F7931A" },
-  Crypto:  { label: "Crypto",  color: "#7C5CFF" },
-  Trading: { label: "Trading", color: "#E5484D" },
-  Gold:    { label: "Gold",    color: "#E8B923" },
-  ETF:     { label: "ETF",     color: "#4A7FD4" },
-  Stocks:  { label: "Stock",  color: "#1FB6C9" },
+  Crypto:  { label: "Crypto",  color: "#7E5DB5" },
+  Trading: { label: "Trading", color: "#7A7267" },
+  Gold:    { label: "Gold",    color: "#A68A2C" },
+  ETF:     { label: "ETF",     color: "#2D63A8" },
+  Stocks:  { label: "Stock",   color: "#2A7F78" },
 };
 const groupColor = (g) => GROUPS_META[g]?.color || "#6B7280";
 
 const COINS = {
-  bitcoin:    { label: "BTC",       fallback: 73500 },
-  ethereum:   { label: "ETH",       fallback: 2333 },
-  dogecoin:   { label: "DOGE",      fallback: 0.0995 },
-  "pax-gold": { label: "Gold (oz)", fallback: 4740 },
+  bitcoin:    { label: "BTC",       unit: "BTC",  fallback: 73500 },
+  ethereum:   { label: "ETH",       unit: "ETH",  fallback: 2333 },
+  dogecoin:   { label: "DOGE",      unit: "DOGE", fallback: 0.0995 },
+  "pax-gold": { label: "Gold (oz)", unit: "oz",   fallback: 4740 },
 };
 const FALLBACK_PRICES = Object.fromEntries(Object.entries(COINS).map(([k, v]) => [k, v.fallback]));
 
@@ -51,6 +51,7 @@ const PRICE_CACHE_KEY = "folio-prices-v1";
 const SEED_SET_PRICES = { CPAXT: 15.20, JCK: 0.13, KEX: null, SCGP: 23.60, TRUE: 13.80, DELTA: 237.50 };
 const STALE_DAYS = 30;
 const DAY_MS = 24 * 60 * 60 * 1000;
+const MAX_FLOWS = 500;
 
 function readPriceCache() {
   try {
@@ -67,7 +68,7 @@ function ago(ts) {
   if (days < 60) return `${days} days ago`;
   return `${Math.floor(days / 30)} months ago`;
 }
-const isStaleManual = (h) => h.type === "manual" && (!h.valueUpdatedAt || Date.now() - h.valueUpdatedAt > STALE_DAYS * DAY_MS);
+const isStaleManual = (h) => h.type === "manual" && !h.sold && (!h.valueUpdatedAt || Date.now() - h.valueUpdatedAt > STALE_DAYS * DAY_MS);
 
 const fundKeyOf = (h) => String(h.fundCode || "").trim().toUpperCase();
 
@@ -101,28 +102,42 @@ function usdCost(h, rate) {
   return (+h.cost || 0) / (rate || 1);
 }
 const hasCost = (h, rate) => usdCost(h, rate) > 0;
+// Which field holds a holding's cost, and in which currency you type it
+const costField = (h) => (h.type === "live" ? "costUSD" : h.type === "set" || h.type === "fund" ? "costTHB" : "cost");
+const costCcy = (h) => (h.type === "live" ? "USD" : h.type === "set" || h.type === "fund" ? "THB" : h.ccy === "THB" ? "THB" : "USD");
 
+const MINUS = "−";
 const fu = (v) => "$" + Math.round(Math.abs(v)).toLocaleString("en-US");
-const sg = (v) => (v >= 0 ? "+" : "-");
-const pc = (v) => (v >= 0 ? "var(--pos)" : "var(--neg)");
-const hexRgb = (h) => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)].join(",");
+const thb = (v) => "฿" + Math.round(Math.abs(v)).toLocaleString("en-US");
+const signed = (v) => (v >= 0 ? "+" : MINUS) + fu(v);
+const pctTxt = (p) => (p >= 0 ? "+" : MINUS) + Math.abs(p).toFixed(1) + "%";
+const tone = (v) => (v >= 0 ? "var(--gain)" : "var(--loss)");
+const round2 = (n) => Math.round(n * 100) / 100;
+const monthKey = (t) => { const d = new Date(t); return d.getFullYear() * 12 + d.getMonth(); };
+const monthName = (t = Date.now()) => new Date(t).toLocaleString("en-US", { month: "short" });
+const num = (x, digits) => (+x || 0).toLocaleString("en-US", { maximumFractionDigits: digits });
 
-function polar(cx, cy, r, deg) { const a = (deg - 90) * Math.PI / 180; return [cx + r * Math.cos(a), cy + r * Math.sin(a)]; }
-function arcPath(cx, cy, oR, iR, s, e) {
-  const g = 2.2, a = s + g / 2, b = e - g / 2;
-  if (b - a < 0.5) return "";
-  const [x1, y1] = polar(cx, cy, oR, a), [x2, y2] = polar(cx, cy, oR, b);
-  const [x3, y3] = polar(cx, cy, iR, b), [x4, y4] = polar(cx, cy, iR, a);
-  const la = b - a > 180 ? 1 : 0, f = (n) => n.toFixed(3);
-  return `M${f(x1)},${f(y1)} A${oR},${oR} 0 ${la} 1 ${f(x2)},${f(y2)} L${f(x3)},${f(y3)} A${iR},${iR} 0 ${la} 0 ${f(x4)},${f(y4)} Z`;
+// One line under a holding's name: how much you hold and where its price comes from
+function holdingSub(h) {
+  if (h.sold) return "Sold, not counted";
+  let s;
+  if (h.type === "live") s = `${num(h.qty, 8)} ${COINS[h.coin]?.unit || ""}, live price`;
+  else if (h.type === "set") s = `${num(h.qty, 0)} shares, SET`;
+  else if (h.type === "fund") s = `${num(h.qty, 4)} units, daily price${h.unitsEstimated ? " (estimated)" : ""}`;
+  else s = "You type the value";
+  if (h.note) s += `, ${h.note}`;
+  return s;
 }
 
+const prefersReducedMotion = () => typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
 // Counts up from 0 on first load, then glides from the current number to the new one
-function useCountUp(target, duration = 1400) {
-  const [val, setVal] = useState(0);
-  const cur = useRef(0);
+function useCountUp(target, duration = 1200) {
+  const [val, setVal] = useState(prefersReducedMotion() ? target : 0);
+  const cur = useRef(prefersReducedMotion() ? target : 0);
   const first = useRef(true);
   useEffect(() => {
+    if (prefersReducedMotion()) { cur.current = target; setVal(target); return; }
     const from = cur.current;
     const dur = first.current ? duration : 650;
     first.current = false;
@@ -139,13 +154,9 @@ function useCountUp(target, duration = 1400) {
     };
     raf = requestAnimationFrame(step);
     return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line
   }, [target]);
   return val;
-}
-function useMounted() {
-  const [m, setM] = useState(false);
-  useEffect(() => { const r = requestAnimationFrame(() => setM(true)); return () => cancelAnimationFrame(r); }, []);
-  return m;
 }
 
 export default function App() {
@@ -158,15 +169,14 @@ export default function App() {
   const [changes, setChanges] = useState(() => cache.changes || {});
   const [priceMode, setPriceMode] = useState("loading");
   const [updatedAt, setUpdatedAt] = useState(() => (cache.at ? new Date(cache.at) : null));
-  const [tab, setTab] = useState("allocation");
-  const [hov, setHovRaw] = useState(null);
-  const isTouch = useRef(typeof window !== "undefined" && ("ontouchstart" in window || (navigator.maxTouchPoints || 0) > 0));
-  // On touch devices, ignore hover entirely so the glow never gets "stuck"
-  const setHov = (v) => { if (!isTouch.current) setHovRaw(v); };
-  const [selected, setSelected] = useState(null);
-  const [expanded, setExpanded] = useState({});
+  const [tab, setTab] = useState("overview");
+  const [openCat, setOpenCat] = useState(null);
+  const [rateOpen, setRateOpen] = useState(false);
+  const [sheet, setSheet] = useState(null); // { h, isNew } — the holding open in the sheet
   const [loaded, setLoaded] = useState(false);
-  const [undo, setUndo] = useState(null); // { kind: "delete", h, idx } or { kind: "reset", holdings }
+  const [undo, setUndo] = useState(null); // { kind: "delete", h, idx } or { kind: "reset", ... }
+  // Money you put in or took out, one entry per buy/sell you record: { id, at, holdingId, name, usd, thb }
+  const [flows, setFlows] = useState([]);
   // Your own names for the categories (e.g. "ETF" → "Mutual funds"); empty = the built-in name
   const [groupLabels, setGroupLabels] = useState({});
   const labelOf = (g) => String(groupLabels[g] || "").trim() || GROUPS_META[g]?.label || g;
@@ -264,6 +274,7 @@ export default function App() {
           const d = JSON.parse(raw);
           if (Array.isArray(d.holdings)) setHoldings(d.holdings);
           if (d.groupLabels && typeof d.groupLabels === "object") setGroupLabels(d.groupLabels);
+          if (Array.isArray(d.flows)) setFlows(d.flows);
           // Only keep a saved rate if you typed it yourself; otherwise it refreshes from the live feed
           if (d.rateManual === true && typeof d.rate === "number" && d.rate > 0) { setRate(d.rate); setRateManual(true); }
         }
@@ -276,7 +287,7 @@ export default function App() {
     if (!loaded) return;
     (async () => {
       try {
-        const payload = JSON.stringify({ holdings, rate, rateManual, groupLabels });
+        const payload = JSON.stringify({ holdings, rate, rateManual, groupLabels, flows });
         if (typeof window !== "undefined" && window.localStorage) {
           window.localStorage.setItem(STORAGE_KEY, payload);
         }
@@ -285,7 +296,7 @@ export default function App() {
         }
       } catch (e) { /* session only */ }
     })();
-  }, [holdings, rate, rateManual, groupLabels, loaded]);
+  }, [holdings, rate, rateManual, groupLabels, flows, loaded]);
 
   // Remember the latest prices so the next visit opens with them
   useEffect(() => {
@@ -387,6 +398,7 @@ export default function App() {
     fetchFx();
   };
   useEffect(() => { fetchPrices(); const t = setInterval(fetchPrices, 90000); return () => clearInterval(t); /* eslint-disable-next-line */ }, []);
+  const refreshAll = () => { fetchPrices(); fetchSetPrices(true); fetchFundPrices(true); };
 
   // iPhone pauses the page in the background — refresh as soon as you come back to it
   useEffect(() => {
@@ -405,89 +417,93 @@ export default function App() {
   // Fetch a fresh USD/THB rate once storage has loaded, and again when you switch the rate back to automatic
   useEffect(() => { if (loaded && !rateManual) fetchFx(true); /* eslint-disable-next-line */ }, [loaded, rateManual]);
 
-  const fthb = (v) => "฿" + Math.round(Math.abs(v) * rate).toLocaleString("en-US");
-
+  // ── Totals ──
   const groups = useMemo(() => ORDER.map((g) => {
-    const items = holdings.filter((h) => h.group === g);
-    const val = items.filter((h) => !h.sold).reduce((s, h) => s + usdValue(h, prices, rate, setP, fundP), 0);
-    const costItems = items.filter((h) => hasCost(h, rate));
-    // Only show group-level cost/PL if ALL active items have a cost basis
-    // Otherwise it would mix costed + uncosted items and show a misleading return %
-    const activeItems = items.filter((h) => !h.sold);
-    const allCosted = activeItems.length > 0 && activeItems.every((h) => hasCost(h, rate));
-    const cost = allCosted ? costItems.reduce((s, h) => s + usdCost(h, rate), 0) : null;
-    const itemRows = items.map((h) => ({
-      name: h.name, id: h.id,
-      val: usdValue(h, prices, rate, setP, fundP),
-      cost: hasCost(h, rate) ? usdCost(h, rate) : null,
-      live: h.type === "live",
-      set: h.type === "set",
-      fund: h.type === "fund",
-      chg: h.type === "live" ? changes[h.coin] : undefined,
-      note: h.sold ? "Sold" : h.note,
-    }));
-    return { g, label: labelOf(g), color: GROUPS_META[g].color, val, cost, items: itemRows };
-  }).filter((r) => r.items.length > 0), [holdings, prices, rate, changes, setP, fundP, groupLabels]);
+    const all = holdings.filter((h) => h.group === g);
+    const items = all.filter((h) => !h.sold).map((h) => {
+      const val = usdValue(h, prices, rate, setP, fundP);
+      const cost = hasCost(h, rate) ? usdCost(h, rate) : null;
+      return { h, id: h.id, name: h.name, val, cost, pl: cost != null ? val - cost : null };
+    }).sort((a, b) => b.val - a.val);
+    const val = items.reduce((s, i) => s + i.val, 0);
+    const costed = items.filter((i) => i.cost != null);
+    const cost = costed.reduce((s, i) => s + i.cost, 0);
+    const costedVal = costed.reduce((s, i) => s + i.val, 0);
+    return { g, label: labelOf(g), color: groupColor(g), all, items, val,
+      cost: costed.length ? cost : null, worth: costedVal, pl: costed.length ? costedVal - cost : null };
+    // eslint-disable-next-line
+  }).filter((r) => r.all.length > 0), [holdings, prices, rate, setP, fundP, groupLabels]);
 
   const totalVal = groups.reduce((s, r) => s + r.val, 0);
-  const basisCost = holdings.filter((h) => hasCost(h, rate)).reduce((s, h) => s + usdCost(h, rate), 0);
-  const basisPL = holdings.filter((h) => hasCost(h, rate)).reduce((s, h) => s + (usdValue(h, prices, rate, setP, fundP) - usdCost(h, rate)), 0);
-  const basisPLpct = basisCost > 0 ? (basisPL / basisCost) * 100 : 0;
-  const GRAND = { value: totalVal, cost: basisCost, pl: basisPL, plPct: basisPLpct };
+  const basisCost = groups.reduce((s, r) => s + (r.cost || 0), 0);
+  const basisPL = groups.reduce((s, r) => s + (r.pl || 0), 0);
+  const GRAND = { value: totalVal, cost: basisCost, pl: basisPL, plPct: basisCost > 0 ? (basisPL / basisCost) * 100 : 0 };
 
   const alloc = useMemo(() => groups.filter((r) => r.val > 0)
-    .map((r) => ({ g: r.g, label: r.label, value: r.val, color: r.color, share: totalVal > 0 ? (r.val / totalVal) * 100 : 0 }))
-    .sort((a, b) => b.value - a.value), [groups, totalVal]);
+    .map((r) => ({ ...r, share: totalVal > 0 ? (r.val / totalVal) * 100 : 0 }))
+    .sort((a, b) => b.val - a.val), [groups, totalVal]);
 
-  const tickers = useMemo(() => ([
-    { sym: "BTC",  price: fu(prices.bitcoin),                      chg: changes.bitcoin,     color: "#F7931A" },
-    { sym: "ETH",  price: fu(prices.ethereum),                     chg: changes.ethereum,    color: "#7C5CFF" },
-    { sym: "DOGE", price: "$" + (prices.dogecoin ?? 0).toFixed(3), chg: changes.dogecoin,    color: "#C2A633" },
-    { sym: "GOLD", price: fu(prices["pax-gold"]) + "/oz",          chg: changes["pax-gold"], color: "#E8B923" },
-  ]), [prices, changes]);
+  // Money added (or taken out) this calendar month, from the buys and sells you recorded
+  const thisMonth = flows.filter((f) => monthKey(f.at) === monthKey(Date.now()));
+  const month = {
+    count: thisMonth.length,
+    usd: thisMonth.reduce((s, f) => s + (+f.usd || 0), 0),
+    thb: thisMonth.reduce((s, f) => s + (+f.thb || 0), 0),
+    name: monthName(),
+  };
 
-  const count = useCountUp(GRAND.value, 1400);
+  const count = useCountUp(Math.round(GRAND.value));
 
   const update = (id, patch) => setHoldings((hs) => hs.map((h) => (h.id === id ? { ...h, ...patch } : h)));
+  const startUndo = (u, ms) => {
+    setUndo(u);
+    clearTimeout(undoTimer.current);
+    undoTimer.current = setTimeout(() => setUndo(null), ms);
+  };
   const remove = (id) => {
     const idx = holdings.findIndex((h) => h.id === id);
     if (idx < 0) return;
-    setUndo({ kind: "delete", h: holdings[idx], idx });
+    startUndo({ kind: "delete", h: holdings[idx], idx }, 6000);
     setHoldings((hs) => hs.filter((h) => h.id !== id));
-    clearTimeout(undoTimer.current);
-    undoTimer.current = setTimeout(() => setUndo(null), 6000);
   };
   const undoLast = () => {
     if (!undo) return;
     if (undo.kind === "reset") {
       setHoldings(undo.holdings);
       setGroupLabels(undo.groupLabels || {});
+      setFlows(undo.flows || []);
     } else {
       setHoldings((hs) => { const next = [...hs]; next.splice(Math.min(undo.idx, next.length), 0, undo.h); return next; });
-      setExpanded((e) => ({ ...e, [undo.h.group]: true }));
     }
     clearTimeout(undoTimer.current);
     setUndo(null);
   };
   useEffect(() => () => clearTimeout(undoTimer.current), []);
-  const addHolding = (group = "Crypto") => {
-    setHoldings((hs) => [...hs, { id: uid(), name: "New asset", group, type: "manual", ccy: "USD", cost: 0, value: 0, valueUpdatedAt: Date.now() }]);
-    setExpanded((e) => ({ ...e, [group]: true })); // open that group so the new row is visible
-  };
   const resetData = () => {
     if (typeof window === "undefined") return;
-    if (!window.confirm("Erase all your holdings on this device and go back to the app's built-in data?\n\nExport a backup first if you want to keep them. You'll have 10 seconds to undo.")) return;
-    setUndo({ kind: "reset", holdings, groupLabels });
+    if (!window.confirm("Erase all your holdings on this iPhone and go back to the starter list?\n\nSave a backup first if you want to keep them. You'll have 10 seconds to undo.")) return;
+    startUndo({ kind: "reset", holdings, groupLabels, flows }, 10000);
     setHoldings(SEED_HOLDINGS);
     setGroupLabels({});
-    clearTimeout(undoTimer.current);
-    undoTimer.current = setTimeout(() => setUndo(null), 10000);
+    setFlows([]);
   };
 
-  // ── Backup: export holdings to a .json file / import one back ──
+  const openHolding = (h) => setSheet({ h, isNew: false });
+  const addHolding = (group) => setSheet({
+    h: { id: uid(), name: "", group, type: "manual", ccy: "USD", cost: 0, value: 0, valueUpdatedAt: Date.now() },
+    isNew: true,
+  });
+  const saveSheet = (d, newFlows) => {
+    const clean = { ...d, name: String(d.name || "").trim() || "New asset" };
+    setHoldings((hs) => (sheet && sheet.isNew ? [...hs, clean] : hs.map((h) => (h.id === clean.id ? clean : h))));
+    if (newFlows.length) setFlows((f) => [...f, ...newFlows].slice(-MAX_FLOWS));
+    setSheet(null);
+  };
+
+  // ── Backup: save holdings to a .json file / restore one ──
   const exportBackup = () => {
     try {
-      const payload = JSON.stringify({ app: "folio", version: 7, exportedAt: new Date().toISOString(), rate, rateManual, groupLabels, holdings }, null, 2);
+      const payload = JSON.stringify({ app: "folio", version: 7, exportedAt: new Date().toISOString(), rate, rateManual, groupLabels, flows, holdings }, null, 2);
       const d = new Date();
       const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
       const filename = `folio-backup-${stamp}.json`;
@@ -529,128 +545,72 @@ export default function App() {
         const ok = d.holdings.every((h) => h && typeof h === "object" && h.id && h.name && h.group);
         if (!ok) throw new Error("Some holdings in this file are malformed.");
         const when = d.exportedAt ? new Date(d.exportedAt).toLocaleString() : "unknown date";
-        if (!window.confirm(`Restore backup from ${when} (${d.holdings.length} holdings)? This replaces what's saved on this device.`)) return;
+        if (!window.confirm(`Restore the backup from ${when} (${d.holdings.length} holdings)? This replaces what's saved on this iPhone.`)) return;
         setHoldings(d.holdings);
-        if (d.groupLabels && typeof d.groupLabels === "object") setGroupLabels(d.groupLabels);
+        setGroupLabels(d.groupLabels && typeof d.groupLabels === "object" ? d.groupLabels : {});
+        setFlows(Array.isArray(d.flows) ? d.flows : []);
         if (d.rateManual === true && typeof d.rate === "number" && d.rate > 0) { setRate(d.rate); setRateManual(true); }
         else setRateManual(false);
         window.alert("Backup restored.");
       } catch (err) {
-        window.alert("Import failed: " + err.message);
+        window.alert("Restore failed: " + err.message);
       }
     };
     reader.readAsText(file);
   };
 
+  const goTab = (k) => { setTab(k); setRateOpen(false); try { window.scrollTo(0, 0); } catch (e) { /* ignore */ } };
+  const lastPriceTime = updatedAt ? updatedAt.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }) : null;
+
   const TABS = [
-    { k: "allocation", label: "Allocation",    short: "Allocation", Icon: PieIcon },
-    { k: "pnl",        label: "Profit & Loss", short: "P&L",        Icon: TableIcon },
-    { k: "edit",       label: "Edit Holdings", short: "Edit",       Icon: GearIcon },
+    { k: "overview", label: "Overview", Icon: OverviewIcon },
+    { k: "gains",    label: "Gains",    Icon: GainsIcon },
+    { k: "holdings", label: "Holdings", Icon: ListIcon },
   ];
 
   return (
-    <div className="folio-root">
+    <div className="folio">
       <style>{CSS}</style>
-      <div className="folio-glow" />
 
-      <nav className="nav">
-        <div className="nav-inner">
-          <div className="nav-logo">
-            <div className="logo-mark" style={{ background:"linear-gradient(140deg,rgba(34,201,128,.2),rgba(43,214,123,.08))", border:"1px solid rgba(34,201,128,.35)", boxShadow:"0 0 18px rgba(34,201,128,.2),inset 0 1px 0 rgba(255,255,255,.08)" }}><svg width="13" height="13" viewBox="0 0 20 20"><polygon points="10,1 19,10 10,19 1,10" fill="#22C980" /></svg></div>
-            <span className="logo-word" style={{ color:"#22C980" }}>FOLIO</span>
-          </div>
-          <div className="nav-right">
-            <div className="fx-wrap">
-              <span className="fx-label">USD/THB</span>
-              <NumInput className="fx-input" value={rate} onChange={(v) => { if (v > 0) { setRateManual(true); setRate(v); } }} />
-              {rateManual && (
-                <button className="fx-auto" onClick={() => setRateManual(false)} title="You set this rate by hand. Tap to use the live rate again.">Auto</button>
-              )}
-            </div>
-          </div>
-        </div>
+      <main className="screen">
+        {tab === "overview" && (
+          <Overview
+            grand={GRAND} count={count} rate={rate} rateManual={rateManual} rateOpen={rateOpen} setRateOpen={setRateOpen}
+            setRate={(v) => { if (v > 0) { setRateManual(true); setRate(v); } }} liveRate={() => setRateManual(false)}
+            alloc={alloc} openCat={openCat} setOpenCat={setOpenCat} month={month}
+            priceMode={priceMode} lastPriceTime={lastPriceTime} refresh={refreshAll} openHolding={openHolding} />
+        )}
+        {tab === "gains" && <Gains groups={groups} grand={GRAND} openHolding={openHolding} />}
+        {tab === "holdings" && (
+          <Holdings holdings={holdings} groups={groups} labelOf={labelOf} renameGroup={renameGroup} rate={rate}
+            update={update} openHolding={openHolding} addHolding={addHolding}
+            exportBackup={exportBackup} importBackup={importBackup} resetData={resetData} />
+        )}
+      </main>
+
+      <nav className="tabbar" aria-label="Main">
+        {TABS.map((t) => (
+          <button key={t.k} type="button" className={`tab${tab === t.k ? " on" : ""}`} aria-current={tab === t.k ? "page" : undefined} onClick={() => goTab(t.k)}>
+            <t.Icon />
+            <span>{t.label}</span>
+          </button>
+        ))}
       </nav>
 
-      <div className="ticker">
-        <div className="ticker-inner">
-          {tickers.map((t, i) => (
-            <React.Fragment key={t.sym}>
-              {i > 0 && <div className="tick-sep" />}
-              <div className="tick-item">
-                <span className="tick-sym" style={{ color: t.color }}>{t.sym}</span>
-                <span className="tick-price">{t.price}</span>
-                {typeof t.chg === "number" && <span className="tick-chg" style={{ color: t.chg >= 0 ? "var(--pos)" : "var(--neg)" }}>{t.chg >= 0 ? "+" : ""}{t.chg.toFixed(1)}%</span>}
-              </div>
-            </React.Fragment>
-          ))}
-          <button className="tick-ts" onClick={fetchPrices} title="Prices last updated — tap to refresh">
-            {priceMode === "live" && <span className="live-dot" />}
-            {priceMode === "offline" ? "offline · " : ""}
-            {updatedAt ? updatedAt.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) : "—"}
-          </button>
-        </div>
-      </div>
-
-      <div className="page pg-fade">
-        <div className="hero">
-          <div className="hero-card">
-            <div className="hero-left">
-              <div className="hero-eyebrow" style={{ color:"var(--live)" }}>Portfolio value</div>
-              <div className="hero-number" style={{ fontSize: 44 }}>${count.toLocaleString("en-US")}</div>
-              <div className="hero-thb">{fthb(GRAND.value)}</div>
-            </div>
-            <div className="hero-divider" />
-            <div className="hero-right">
-              <div className="hero-stat">
-                <div className="stat-lbl">Cost basis</div>
-                <div className="stat-val">{fu(GRAND.cost)}</div>
-                <div className="stat-thb">{fthb(GRAND.cost)}</div>
-              </div>
-              <div className="hero-stat">
-                <div className="stat-lbl">Unrealised P&amp;L</div>
-                <div className="stat-val" style={{ color: pc(GRAND.pl) }}>{sg(GRAND.pl)}{fu(GRAND.pl)}</div>
-                <div className="stat-thb" style={{ color: pc(GRAND.pl) }}>{sg(GRAND.plPct)}{Math.abs(GRAND.plPct).toFixed(1)}% return</div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="tabs-row">
-          {TABS.map((tb) => (
-            <button key={tb.k} className={`tab-btn${tab === tb.k ? " active" : ""}`} onClick={() => setTab(tb.k)}><tb.Icon /> <span className="tab-long">{tb.label}</span><span className="tab-short">{tb.short}</span></button>
-          ))}
-        </div>
-
-        <div key={tab} className="panel-fade">
-          {tab === "allocation" && (
-            <div className="alloc-grid">
-              <div className="card donut-card" onClick={() => { if (selected) { setSelected(null); setHov(null); } }} style={{ cursor: selected ? "pointer" : "default" }}>
-                <Donut alloc={alloc} grand={GRAND} hov={hov} onHov={setHov} fthb={fthb} selected={selected} onSelect={(g) => { setSelected(selected === g ? null : g); setHov(null); }} />
-              </div>
-              {selected
-                ? <DrillDown group={groups.find((gr) => gr.g === selected)} onBack={() => { setSelected(null); setHov(null); }} />
-                : <AllocBars alloc={alloc} grand={GRAND} hov={hov} onHov={setHov} onSelect={(g) => { setSelected(g); setHov(null); }} />}
-            </div>
-          )}
-          {tab === "pnl" && <PnLTable groups={groups} grand={GRAND} hov={hov} onHov={setHov} />}
-          {tab === "edit" && (
-            <EditHoldings holdings={holdings} expanded={expanded} setExpanded={setExpanded}
-              update={update} remove={remove} addHolding={addHolding} resetData={resetData}
-              labelOf={labelOf} renameGroup={renameGroup}
-              exportBackup={exportBackup} importBackup={importBackup} prices={prices} rate={rate} fthb={fthb} setP={setP}
-              setMode={setMode} setMissing={setMissing} fundP={fundP} fundMode={fundMode} fundMissing={fundMissing} fundError={fundError} />
-          )}
-        </div>
-
-        <div className="footer">USD · ฿THB at {rate} · crypto &amp; gold live via CoinGecko · SET stocks via Yahoo Finance ({setMode === "live" ? `updated ${stocksUpdatedAt?.toLocaleTimeString()}` : setMode === "offline" ? "offline · using last known prices" : "loading"}) · funds at daily NAV via the Thai SEC{fundMode === "offline" ? " (offline · using last saved NAV)" : ""} · {updatedAt ? `crypto updated ${updatedAt.toLocaleTimeString()}` : "loading"}</div>
-      </div>
+      {sheet && (
+        <HoldingSheet key={sheet.h.id} start={sheet.h} isNew={sheet.isNew} labelOf={labelOf} rate={rate}
+          prices={prices} setP={setP} fundP={fundP} setMode={setMode} setMissing={setMissing}
+          fundMode={fundMode} fundMissing={fundMissing} fundError={fundError}
+          onSave={saveSheet} onClose={() => setSheet(null)}
+          onDelete={(id) => { setSheet(null); remove(id); }} />
+      )}
 
       {undo && (
         <div className="toast" role="status">
           {undo.kind === "reset"
-            ? <span>All holdings reset to built-in data</span>
+            ? <span>All holdings reset to the starter list</span>
             : <span>Deleted <b>{undo.h.name}</b></span>}
-          <button className="toast-btn" onClick={undoLast}>Undo</button>
+          <button type="button" className="toast-btn" onClick={undoLast}>Undo</button>
         </div>
       )}
     </div>
@@ -659,728 +619,796 @@ export default function App() {
 
 // Number field for phones: decimal keypad, thousands separators when not editing,
 // and it keeps what you type (e.g. "0." or an empty field) instead of fighting you.
-function NumInput({ value, onChange, className, style }) {
+// onCommit(before, after) runs when you leave the field after changing it.
+function NumInput({ value, onChange, onCommit, className, style, id, ariaLabel }) {
   const [draft, setDraft] = useState(null);
+  const startRef = useRef(null);
   const parseDraft = (s) => { const n = parseFloat(String(s).replace(/,/g, "")); return isNaN(n) ? 0 : n; };
-  // If the value is changed from elsewhere (e.g. tapping "Auto" for the rate), show the new value
+  // If the value is changed from elsewhere (e.g. tapping "Use live rate"), show the new value
   useEffect(() => { if (draft !== null && parseDraft(draft) !== (Number(value) || 0)) setDraft(null); /* eslint-disable-next-line */ }, [value]);
   const shown = draft !== null ? draft : (Number(value) || 0).toLocaleString("en-US", { maximumFractionDigits: 8 });
   return (
-    <input className={className} style={style} type="text" inputMode="decimal" autoComplete="off" autoCorrect="off" spellCheck={false}
+    <input id={id} aria-label={ariaLabel} className={className} style={style} type="text" inputMode="decimal" autoComplete="off" autoCorrect="off" spellCheck={false}
       value={shown}
-      onFocus={(e) => { const el = e.target; setDraft(value ? String(value) : ""); setTimeout(() => { try { el.select(); } catch (err) { /* ignore */ } }, 0); }}
+      onFocus={(e) => { const el = e.target; startRef.current = Number(value) || 0; setDraft(value ? String(value) : ""); setTimeout(() => { try { el.select(); } catch (err) { /* ignore */ } }, 0); }}
       onChange={(e) => {
         const raw = e.target.value.replace(/[^0-9.,-]/g, "");
         setDraft(raw);
         onChange(parseDraft(raw));
       }}
-      onBlur={() => setDraft(null)} />
+      onBlur={() => {
+        const after = draft !== null ? parseDraft(draft) : Number(value) || 0;
+        setDraft(null);
+        if (onCommit && startRef.current !== null && after !== startRef.current) onCommit(startRef.current, after);
+        startRef.current = null;
+      }} />
   );
 }
 
-function CategoryCards({ alloc, groups, hov, onHov, fthb }) {
-  const mounted = useMounted();
+// Category marker: the Bitcoin and gold coins, or a small colour square
+function CatMark({ g, color }) {
+  if (g === "BTC") return (
+    <svg className="mark" width="24" height="24" viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="12" fill="#F7931A" />
+      <g transform="rotate(14 12 12)" fill="none" stroke="#FFFFFF" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M9.5 6.5v11" /><path d="M9.5 6.5H13a2.6 2.6 0 0 1 0 5.2H9.5" /><path d="M9.5 11.7h4.1a2.9 2.9 0 0 1 0 5.8H9.5" />
+        <path d="M11 4.8v1.7M13.2 4.8v1.7M11 17.5v1.7M13.2 17.5v1.7" />
+      </g>
+    </svg>
+  );
+  if (g === "Gold") return (
+    <svg className="mark" width="24" height="24" viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="12" fill="#D4A72C" />
+      <g fill="#FFFFFF"><path d="M4.6 17.6l1.2-3.6h5l1.2 3.6z" /><path d="M12 17.6l1.2-3.6h5l1.2 3.6z" /><path d="M8.3 12.9l1.2-3.6h5l1.2 3.6z" /></g>
+    </svg>
+  );
+  return <span className="mark" aria-hidden="true"><span className="swatch" style={{ background: color }} /></span>;
+}
+
+const Chevron = ({ open, down }) => (
+  <svg className="chev" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
+    style={{ transform: open ? (down ? "rotate(180deg)" : "rotate(90deg)") : "none" }}>
+    {down ? <path d="M4 6l4 4 4-4" /> : <path d="M6 3l5 5-5 5" />}
+  </svg>
+);
+
+function Donut({ alloc }) {
+  if (!alloc.length) return null;
+  let acc = 0;
+  const gap = 0.9;
+  const stops = ["var(--paper) 0deg " + gap + "deg"];
+  alloc.forEach((a) => {
+    const a0 = acc * 3.6, a1 = (acc + a.share) * 3.6;
+    stops.push(`${a.color} ${a0 + gap}deg ${Math.max(a0 + gap, a1 - gap)}deg`);
+    stops.push(`var(--paper) ${Math.max(a0 + gap, a1 - gap)}deg ${a1}deg`);
+    acc += a.share;
+  });
+  const top = alloc[0];
+  const label = "Allocation: " + alloc.map((a) => `${a.label} ${a.share.toFixed(1)}%`).join(", ");
   return (
-    <div className="cat-section">
-      <div className="cat-cards">
-        {alloc.map((d, i) => {
-          const grp = groups.find((g) => g.g === d.g);
-          const gpl = grp && grp.cost != null ? grp.val - grp.cost : null;
-          const isH = hov === d.g, isO = hov && !isH;
+    <div className="donut" role="img" aria-label={label} style={{ background: `conic-gradient(${stops.join(", ")})` }}>
+      <div className="donut-hole">
+        <span className="muted small">Biggest</span>
+        <span className="donut-name">{top.label}</span>
+        <span className="muted">{top.share.toFixed(1)}%</span>
+      </div>
+    </div>
+  );
+}
+
+function Overview({ grand, count, rate, rateManual, rateOpen, setRateOpen, setRate, liveRate, alloc, openCat, setOpenCat, month, priceMode, lastPriceTime, refresh, openHolding }) {
+  const out = month.usd < -0.5;
+  const stampTitle = `${out ? "Taken out in" : "Added in"} ${month.name}`;
+  const stampAmt = month.count ? signed(month.usd) : "$0";
+  const stampSub = month.count ? thb(month.thb) : "nothing yet";
+  return (
+    <>
+      <header className="topbar">
+        <div className="wordmark">Folio</div>
+        <button type="button" className="chip" aria-expanded={rateOpen} onClick={() => setRateOpen(!rateOpen)}
+          aria-label={`Exchange rate, ${rate} baht per dollar${rateManual ? ", set by you" : ""}. Tap to change`}>
+          ฿{rate} = $1{rateManual ? " (yours)" : ""}
+        </button>
+      </header>
+      {rateOpen && (
+        <div className="rate-panel">
+          <label htmlFor="rate-in" className="rate-lbl">Baht per dollar</label>
+          <NumInput id="rate-in" className="field-in rate-in" value={rate} onChange={setRate} />
+          {rateManual
+            ? <button type="button" className="btn-line" onClick={liveRate}>Use live rate</button>
+            : <span className="muted small">Live rate, checked every hour</span>}
+        </div>
+      )}
+
+      <section className="hero">
+        <div className="muted">Everything you own</div>
+        <div className="total">${count.toLocaleString("en-US")}</div>
+        <div className="muted big">{thb(grand.value * rate)}</div>
+        <div className="stamp" aria-label={`${stampTitle}: ${stampAmt}`}>
+          <span className="stamp-t">{stampTitle}</span>
+          <span className="stamp-n">{stampAmt}</span>
+          <span className="stamp-s">{stampSub}</span>
+        </div>
+      </section>
+
+      <div className="pair">
+        <div>
+          <div className="muted small">You put in</div>
+          <div className="pair-n">{fu(grand.cost)}</div>
+        </div>
+        <div>
+          <div className="muted small">Since you bought</div>
+          <div className="pair-n" style={{ color: tone(grand.pl) }}>{signed(grand.pl)} <span className="pair-p">({pctTxt(grand.plPct)})</span></div>
+        </div>
+      </div>
+
+      <div className="sec-head">
+        <h2>Where your money is</h2>
+        <span className="muted small">{alloc.length} {alloc.length === 1 ? "category" : "categories"}</span>
+      </div>
+      <Donut alloc={alloc} />
+
+      <div className="list">
+        {alloc.map((c) => {
+          const open = openCat === c.g;
           return (
-            <div key={d.g} className="card-in" style={{ animationDelay: `${i * 55}ms` }}>
-              <div className="cat-card" style={{
-                background: isH ? `rgba(${hexRgb(d.color)},.1)` : "var(--bg-card)",
-                borderColor: isH ? `rgba(${hexRgb(d.color)},.4)` : "var(--border)",
-                borderTopColor: isH ? d.color + "80" : "var(--border-hi)",
-                boxShadow: isH ? `0 0 28px rgba(${hexRgb(d.color)},.18),inset 0 1px 0 rgba(255,255,255,.07)` : "inset 0 1px 0 rgba(255,255,255,.04)",
-                opacity: isO ? 0.3 : 1,
-              }} onMouseEnter={() => onHov(d.g)} onMouseLeave={() => onHov(null)}>
-                <div className="cat-eyebrow-row" style={{ color: d.color }}>
-                  <span className="cat-dot" style={{ background: d.color, boxShadow: `0 0 6px ${d.color}` }} />{d.label}
+            <div key={c.g} className="row-wrap">
+              <button type="button" className="row" aria-expanded={open} onClick={() => setOpenCat(open ? null : c.g)}>
+                <CatMark g={c.g} color={c.color} />
+                <span className="row-main">
+                  <span className="row-name">{c.label}</span>
+                  <span className="row-sub">{c.share.toFixed(1)}% of your money</span>
+                </span>
+                <span className="row-end">
+                  <span className="row-val">{fu(c.val)}</span>
+                  {c.pl != null
+                    ? <span className="row-sub" style={{ color: tone(c.pl) }}>{signed(c.pl)} ({pctTxt(c.cost > 0 ? c.pl / c.cost * 100 : 0)})</span>
+                    : <span className="row-sub">No cost recorded</span>}
+                </span>
+                <Chevron open={open} />
+              </button>
+              {open && (
+                <div className="sub-list">
+                  {c.items.map((it) => (
+                    <button key={it.id} type="button" className="sub-row" onClick={() => openHolding(it.h)}>
+                      <span className="row-main">
+                        <span className="sub-name">{it.name}</span>
+                        <span className="row-sub">{holdingSub(it.h)}</span>
+                      </span>
+                      <span className="row-end">
+                        <span className="sub-name">{fu(it.val)}</span>
+                        {it.pl != null
+                          ? <span className="row-sub" style={{ color: tone(it.pl) }}>{signed(it.pl)} ({pctTxt(it.cost > 0 ? it.pl / it.cost * 100 : 0)})</span>
+                          : <span className="row-sub">No cost recorded</span>}
+                      </span>
+                    </button>
+                  ))}
                 </div>
-                <div className="cat-val">{fu(d.value)}</div>
-                <div className="cat-thb">{fthb(d.value)}</div>
-                <div className="cat-bar-track">
-                  <div className="cat-bar-fill" style={{ width: mounted ? d.share + "%" : 0, background: d.color, boxShadow: `0 0 8px ${d.color}80`, transition: "width .6s var(--ease)", transitionDelay: `${i * 60}ms` }} />
-                </div>
-                <div className="cat-footer">
-                  <span className="cat-pct" style={{ color: d.color }}>{d.share.toFixed(1)}%</span>
-                  {gpl != null && <span className="cat-pl" style={{ color: gpl >= 0 ? "var(--pos)" : "var(--neg)" }}>{gpl >= 0 ? "+" : "-"}{fu(Math.abs(gpl))}</span>}
-                </div>
-              </div>
+              )}
             </div>
           );
         })}
       </div>
-    </div>
-  );
-}
 
-function Donut({ alloc, grand, hov, onHov, fthb, selected, onSelect }) {
-  const CX = 120, CY = 120, OR = 103, IR = 68;
-  let cum = 0;
-  const segs = alloc.map((d) => { const st = cum * 3.6; cum += d.share; return { ...d, st, en: cum * 3.6 }; });
-  const activeG = hov || selected;
-  const active = activeG ? alloc.find((a) => a.g === activeG) : null;
-  const cLabel = active ? active.label : "Total value";
-  const cVal = active ? fu(active.value) : fu(grand.value);
-  const cSub = active ? active.share.toFixed(1) + "%" : fthb(grand.value);
-  const cClr = active ? active.color : "var(--fg1)";
-  return (
-    <svg width="290" height="290" viewBox="0 0 240 240" style={{ display: "block", margin: "0 auto", overflow: "visible" }}>
-      <defs>
-        {segs.map((s) => (
-          <filter key={s.g} id={`gl-${s.g}`} x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="5" result="b" /><feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge></filter>
-        ))}
-      </defs>
-      {segs.map((s) => {
-        const isH = s.g === hov || s.g === selected;
-        const isO = activeG && !isH;
-        return (
-          <path key={s.g} d={arcPath(CX, CY, isH ? OR + 7 : OR, IR, s.st, s.en)} fill={s.color} opacity={isO ? 0.15 : 1}
-            filter={isH ? `url(#gl-${s.g})` : "none"} style={{ cursor: "pointer", transition: "opacity .2s ease" }}
-            onMouseEnter={() => onHov(s.g)} onMouseLeave={() => onHov(null)} onClick={() => onSelect(s.g)} />
-        );
-      })}
-      <text x={CX} y={CY - 14} textAnchor="middle" fill="var(--fg3)" fontSize="10" fontFamily="'Sora',sans-serif" fontWeight="500">{cLabel}</text>
-      <text x={CX} y={CY + 9} textAnchor="middle" fill={cClr} fontSize="17" fontWeight="600" fontFamily="'JetBrains Mono',monospace" style={{ fontFeatureSettings: '"tnum"' }}>{cVal}</text>
-      <text x={CX} y={CY + 27} textAnchor="middle" fill="var(--fg3)" fontSize="11.5" fontFamily="'JetBrains Mono',monospace">{cSub}</text>
-    </svg>
-  );
-}
-
-function AllocBars({ alloc, grand, hov, onHov, onSelect }) {
-  const mounted = useMounted();
-  return (
-    <div className="bars-card card">
-      <div className="bars-hdr"><span className="bars-title">Category breakdown</span><span className="bars-total">{fu(grand.value)}</span></div>
-      {alloc.map((d, i) => {
-        const isH = d.g === hov, isO = hov && !isH;
-        return (
-          <div key={d.g} className="bar-item" style={{ opacity: isO ? 0.28 : 1, cursor: "pointer" }}
-            onMouseEnter={() => onHov(d.g)} onMouseLeave={() => onHov(null)}
-            onClick={() => onSelect && onSelect(d.g)}>
-            <div className="bar-meta">
-              <span className="bar-name"><span className="bar-pip" style={{ background: d.color, boxShadow: isH ? `0 0 9px ${d.color}` : "none" }} />{d.label}</span>
-              <span className="bar-nums"><span className="bar-pct">{d.share.toFixed(1)}%</span><span className="bar-usd">${Math.round(d.value).toLocaleString("en-US")}</span></span>
-            </div>
-            <div className="bar-track">
-              <div className="bar-fill" style={{ width: mounted ? d.share + "%" : 0, background: `linear-gradient(90deg, ${d.color}99, ${d.color})`, boxShadow: isH ? `0 0 12px ${d.color}90` : `0 0 6px ${d.color}45`, opacity: isH ? 1 : 0.72, transitionDelay: mounted ? "0ms" : `${i * 70}ms` }} />
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function MiniDonut({ group }) {
-  const CX = 80, CY = 80, OR = 66, IR = 46;
-  const total = group.val || 1;
-  const live = group.items.filter((it) => it.val > 0);
-  let cum = 0;
-  const segs = live.map((item) => { const share = (item.val / total) * 100; const st = cum * 3.6; cum += share; return { ...item, share, st, en: cum * 3.6 }; });
-  const opacities = [1, 0.62, 0.42, 0.28, 0.2];
-  return (
-    <svg width="160" height="160" viewBox="0 0 160 160" style={{ display: "block", flexShrink: 0 }}>
-      <defs><filter id="gl-mini" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="4" result="b" /><feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge></filter></defs>
-      {segs.map((s, i) => (
-        <path key={s.name} d={arcPath(CX, CY, OR, IR, s.st, s.en)} fill={group.color} opacity={opacities[i] !== undefined ? opacities[i] : 0.18} filter="url(#gl-mini)" />
-      ))}
-      <text x={CX} y={CY - 4} textAnchor="middle" fill="var(--fg1)" fontSize="20" fontWeight="700" fontFamily="'JetBrains Mono',monospace">{live.length}</text>
-      <text x={CX} y={CY + 13} textAnchor="middle" fill="var(--fg3)" fontSize="10" fontFamily="'Sora',sans-serif">{live.length === 1 ? "asset" : "assets"}</text>
-    </svg>
-  );
-}
-
-function DrillDown({ group, onBack }) {
-  const mounted = useMounted();
-  if (!group) return null;
-  const total = group.val || 1;
-  const items = group.items.filter((it) => it.val > 0).map((item) => ({ ...item, share: (item.val / total) * 100 }));
-  return (
-    <div className="bars-card card" style={{ animation: "plfade .22s ease both", cursor: "pointer" }} onClick={onBack} title="Tap anywhere to go back">
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 22 }}>
-        <span style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 600, color: "var(--fg1)" }}>
-          <span style={{ width: 8, height: 8, borderRadius: 2, background: group.color, boxShadow: `0 0 8px ${group.color}`, display: "inline-block", flexShrink: 0 }} />{group.label}
+      <div className="updated">
+        <span className="muted small">
+          {priceMode === "offline" ? "Offline, showing saved prices" : lastPriceTime ? `Prices updated ${lastPriceTime}` : "Getting prices…"}
         </span>
+        <button type="button" className="btn-text" onClick={refresh}><RefreshIcon /> Refresh</button>
       </div>
-      <div className="drill-grid">
-        <MiniDonut group={group} />
-        <div>
-          {items.map((item, i) => (
-            <div key={item.name} style={{ marginBottom: i < items.length - 1 ? 16 : 0 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 7 }}>
-                <span style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 500, color: "var(--fg1)", minWidth: 0, overflow: "hidden" }}>
-                  <span style={{ width: 7, height: 7, borderRadius: 2, background: group.color, flexShrink: 0, display: "inline-block" }} />
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.name}</span>
+    </>
+  );
+}
+
+function Gains({ groups, grand, openHolding }) {
+  const [sort, setSort] = useState("cat");
+  const costedGroups = groups.map((g) => ({ ...g, rows: g.items.filter((i) => i.cost != null) })).filter((g) => g.rows.length);
+  const flat = costedGroups.flatMap((g) => g.rows.map((r) => ({ ...r, g: g.g, color: g.color }))).sort((a, b) => Math.abs(b.pl) - Math.abs(a.pl));
+  const noCost = groups.flatMap((g) => g.items.filter((i) => i.cost == null));
+  const Row = ({ r, mark }) => (
+    <button type="button" className="g-row" onClick={() => openHolding(r.h)}>
+      {mark && <span className="mark" aria-hidden="true"><span className="swatch small" style={{ background: r.color }} /></span>}
+      <span className="row-main">
+        <span className="row-name">{r.name}</span>
+        <span className="row-sub">Worth {fu(r.val)}, cost {fu(r.cost)}{r.h.note ? `, ${r.h.note}` : ""}</span>
+      </span>
+      <span className="row-end">
+        <span className="row-val" style={{ color: tone(r.pl) }}>{signed(r.pl)}</span>
+        <span className="row-sub" style={{ color: tone(r.pl) }}>{pctTxt(r.cost > 0 ? r.pl / r.cost * 100 : 0)}</span>
+      </span>
+    </button>
+  );
+  return (
+    <>
+      <header className="page-head">
+        <h1>Gains and losses</h1>
+        <div className="gl-total" style={{ color: tone(grand.pl) }}>
+          <span className="gl-n">{signed(grand.pl)}</span>
+          <span className="gl-p">{pctTxt(grand.plPct)}</span>
+        </div>
+        <div className="muted">since you bought, on {fu(grand.cost)} put in</div>
+      </header>
+
+      <div className="seg" role="group" aria-label="Sort">
+        <button type="button" className={sort === "cat" ? "on" : ""} aria-pressed={sort === "cat"} onClick={() => setSort("cat")}>By category</button>
+        <button type="button" className={sort === "size" ? "on" : ""} aria-pressed={sort === "size"} onClick={() => setSort("size")}>Biggest moves</button>
+      </div>
+
+      {sort === "cat" && (
+        <div className="list">
+          {costedGroups.map((g) => (
+            <section key={g.g} className="g-group">
+              <div className="g-head">
+                <CatMark g={g.g} color={g.color} />
+                <span className="row-main">
+                  <span className="g-name">{g.label}</span>
+                  <span className="row-sub">Worth {fu(g.worth)}, cost {fu(g.cost)}</span>
                 </span>
-                <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 12, display: "flex", gap: 10, flexShrink: 0, marginLeft: 8 }}>
-                  <span style={{ color: "var(--fg1)", fontWeight: 600 }}>{item.share.toFixed(1)}%</span>
-                  <span style={{ color: "var(--fg3)" }}>${Math.round(item.val).toLocaleString("en-US")}</span>
+                <span className="row-end">
+                  <span className="g-pl" style={{ color: tone(g.pl) }}>{signed(g.pl)}</span>
+                  <span className="row-sub" style={{ color: tone(g.pl), fontWeight: 500 }}>{pctTxt(g.cost > 0 ? g.pl / g.cost * 100 : 0)}</span>
                 </span>
               </div>
-              <div className="bar-track">
-                <div className="bar-fill" style={{ width: mounted ? item.share + "%" : 0, background: `linear-gradient(90deg, ${group.color}99, ${group.color})`, boxShadow: `0 0 6px ${group.color}45`, opacity: 0.8, transitionDelay: `${i * 60}ms` }} />
-              </div>
-            </div>
+              {g.rows.map((r) => <Row key={r.id} r={r} />)}
+            </section>
           ))}
         </div>
-      </div>
-      <div style={{ marginTop: 20, fontSize: 11, color: "var(--fg4)", fontFamily: "'JetBrains Mono',monospace" }}>Weight of each holding within {group.label}. Tap anywhere to go back.</div>
-    </div>
+      )}
+      {sort === "size" && (
+        <div className="list" style={{ paddingTop: 8 }}>
+          {flat.map((r) => <Row key={r.id} r={r} mark />)}
+        </div>
+      )}
+
+      {noCost.length > 0 && (
+        <section className="block">
+          <h2 className="h-small">Not counted yet</h2>
+          <p className="muted small">These have no cost recorded, so they are left out of your gain.</p>
+          <div className="list">
+            {noCost.map((r) => (
+              <div key={r.id} className="nc-row">
+                <span className="row-main">
+                  <span className="row-name">{r.name}</span>
+                  <span className="row-sub">Worth {fu(r.val)}</span>
+                </span>
+                <button type="button" className="chip strong" onClick={() => openHolding(r.h)}>Add cost</button>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+    </>
   );
 }
 
-function PnLTable({ groups, grand, hov, onHov }) {
-  const [open, setOpen] = useState({});
-  const toggle = (g) => setOpen((s) => ({ ...s, [g]: !s[g] }));
-  const costed = groups.filter((g) => g.cost);
-  const maxAbsPct = costed.length ? Math.max(...costed.map((g) => Math.abs((g.val - g.cost) / g.cost * 100))) : 1;
-  return (
-    <div className="card pnl-card">
-      <div className="pnl-scroll">
-        <table className="pnl-table">
-          <thead>
-            <tr>
-              <th style={{ textAlign: "left" }}>Asset</th>
-              <th className="pnl-col-cost">Cost basis</th>
-              <th className="pnl-hdr-cv">Value</th>
-              <th>P&amp;L</th>
-              <th className="pnl-col-return">Return</th>
-            </tr>
-          </thead>
-          <tbody>
-            {groups.map((grp) => {
-              const isO2 = open[grp.g];
-              const gpl = grp.cost != null ? grp.val - grp.cost : null;
-              const gpp = grp.cost ? gpl / grp.cost * 100 : null;
-              const isHov = hov === grp.g, isOther = hov && !isHov;
-              return (
-                <React.Fragment key={grp.g}>
-                  <tr className="g-row" onClick={() => toggle(grp.g)} onMouseEnter={() => onHov(grp.g)} onMouseLeave={() => onHov(null)} style={{ opacity: isOther ? 0.35 : 1 }}>
-                    <td style={{ borderLeft: `3px solid ${isHov ? grp.color : "transparent"}`, paddingLeft: isHov ? 11 : 14, transition: "border-color .15s,padding .15s" }}>
-                      <span className="g-name">
-                        <span className="g-dot" style={{ background: grp.color, boxShadow: isHov ? `0 0 7px ${grp.color}` : "none" }} />{grp.label}
-                        <span className="h-ct">· {grp.items.length} {grp.items.length > 1 ? "holdings" : "holding"}</span>
-                      </span>
-                    </td>
-                    <td className="pnl-col-cost">{grp.cost != null ? fu(grp.cost) : "—"}</td>
-                    <td>{fu(grp.val)}</td>
-                    <td style={{ color: gpl != null ? pc(gpl) : "var(--fg4)" }}>{gpl != null ? sg(gpl) + fu(gpl) : "—"}</td>
-                    <td className="pnl-col-return">
-                      {gpp != null ? (
-                        <div className="ret-bar-wrap">
-                          <span style={{ color: pc(gpp), minWidth: 52, textAlign: "right" }}>{sg(gpp)}{Math.abs(gpp).toFixed(1)}%</span>
-                          <div className="ret-bar-track"><div className="ret-bar-fill" style={{ width: `${Math.min(Math.abs(gpp) / maxAbsPct * 100, 100)}%`, background: gpp >= 0 ? "var(--pos)" : "var(--neg)", opacity: 0.7 }} /></div>
-                        </div>
-                      ) : <span className="dim">—</span>}
-                    </td>
-                  </tr>
-                  {isO2 && grp.items.map((item) => {
-                    const pl = item.cost != null ? item.val - item.cost : null;
-                    const pp = item.cost ? pl / item.cost * 100 : null;
-                    return (
-                      <tr key={item.name} className="item-row" style={{ opacity: isOther ? 0.35 : 1 }}>
-                        <td>
-                          {item.name}
-                          {item.live && <span className="live-badge">LIVE</span>}
-                          {item.set && <span className="live-badge" style={{ color:"#1FB6C9", borderColor:"rgba(31,182,201,.25)", background:"rgba(31,182,201,.07)" }}>SET</span>}
-                          {item.fund && <span className="live-badge" style={{ color:"#4A7FD4", borderColor:"rgba(74,127,212,.3)", background:"rgba(74,127,212,.08)" }}>NAV</span>}
-                          {typeof item.chg === "number" && <span className="chg-chip" style={{ color: item.chg >= 0 ? "var(--pos)" : "var(--neg)" }}>{item.chg >= 0 ? "+" : ""}{item.chg.toFixed(1)}%</span>}
-                          {item.note && <span className="note-chip">{item.note}</span>}
-                        </td>
-                        <td className="pnl-col-cost">{item.cost != null ? fu(item.cost) : "—"}</td>
-                        <td>{fu(item.val)}</td>
-                        <td style={{ color: pl != null ? pc(pl) : "var(--fg4)" }}>{pl != null ? sg(pl) + fu(pl) : "—"}</td>
-                        <td className="pnl-col-return" style={{ color: pp != null ? pc(pp) : "var(--fg4)" }}>{pp != null ? `${sg(pp)}${Math.abs(pp).toFixed(1)}%` : "—"}</td>
-                      </tr>
-                    );
-                  })}
-                </React.Fragment>
-              );
-            })}
-            <tr className="total-row">
-              <td style={{ fontFamily: "'Sora',sans-serif", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".1em" }}>Total</td>
-              <td className="bold pnl-col-cost">{fu(grand.cost)}</td>
-              <td className="bold">{fu(grand.value)}</td>
-              <td className="bold" style={{ color: pc(grand.pl) }}>{sg(grand.pl) + fu(grand.pl)}</td>
-              <td className="bold pnl-col-return" style={{ color: pc(grand.plPct) }}>{sg(grand.plPct) + Math.abs(grand.plPct).toFixed(1) + "%"}</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHolding, resetData, labelOf, renameGroup, exportBackup, importBackup, prices, rate, fthb, setP, setMode, setMissing, fundP, fundMode, fundMissing, fundError }) {
-  const [showAdd, setShowAdd] = React.useState(false);
-  const [renaming, setRenaming] = React.useState(null); // category key being renamed
-  const [nameDraft, setNameDraft] = React.useState("");
-  const fileRef = React.useRef(null);
-  const startRename = (g) => { setRenaming(g); setNameDraft(labelOf(g)); };
+function Holdings({ holdings, groups, labelOf, renameGroup, rate, update, openHolding, addHolding, exportBackup, importBackup, resetData }) {
+  const [open, setOpen] = useState(null);
+  const [picking, setPicking] = useState(false);
+  const [renaming, setRenaming] = useState(null);
+  const [nameDraft, setNameDraft] = useState("");
+  const fileRef = useRef(null);
+  const manual = holdings.filter((h) => h.type === "manual" && !h.sold);
+  const staleCount = manual.filter(isStaleManual).length;
   const finishRename = () => { if (renaming) renameGroup(renaming, nameDraft); setRenaming(null); };
-  const staleCount = holdings.filter(isStaleManual).length;
   return (
-    <div className="card" style={{ padding: 22 }}>
-      <div className="edit-hdr">
-        <div>
-          <div className="edit-title">Holdings</div>
-          <div className="edit-sub">Click a category to expand and edit</div>
-          {staleCount > 0 && (
-            <div className="edit-stale">{staleCount} manual {staleCount === 1 ? "value" : "values"} may be out of date (not updated in the last {STALE_DAYS} days)</div>
-          )}
+    <>
+      <header className="page-head row-between">
+        <h1>Holdings</h1>
+        <button type="button" className="btn-ink" aria-expanded={picking} onClick={() => setPicking((p) => !p)}><PlusIcon /> Add</button>
+      </header>
+      {picking && (
+        <div className="picker" role="group" aria-label="Add to which category?">
+          <div className="muted small">Add to which category?</div>
+          <div className="picker-grid">
+            {ORDER.map((g) => (
+              <button key={g} type="button" className="picker-btn" onClick={() => { setPicking(false); addHolding(g); }}>
+                <CatMark g={g} color={groupColor(g)} /> {labelOf(g)}
+              </button>
+            ))}
+          </div>
         </div>
-        <div style={{ display: "flex", gap: 8, position: "relative", flexWrap: "wrap" }}>
-          <input ref={fileRef} type="file" accept="application/json,.json" style={{ display: "none" }}
-            onChange={(e) => { importBackup(e.target.files && e.target.files[0]); e.target.value = ""; }} />
-          <button className="btn-ghost" onClick={exportBackup}><DownloadIcon /> Export backup</button>
-          <button className="btn-ghost" onClick={() => fileRef.current && fileRef.current.click()}><UploadIcon /> Import backup</button>
-          <button className="btn-accent" onClick={() => setShowAdd((s) => !s)}><PlusIcon /> Add asset</button>
-          {showAdd && (
-            <div className="add-menu">
-              <div className="add-menu-label">Add to which category?</div>
-              {ORDER.map((g) => (
-                <button key={g} className="add-menu-item" onClick={() => { addHolding(g); setShowAdd(false); }}>
-                  <span style={{ width: 8, height: 8, borderRadius: 2, background: groupColor(g), boxShadow: `0 0 6px ${groupColor(g)}`, display: "inline-block", flexShrink: 0 }} />
-                  {labelOf(g)}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
+      )}
 
-      {ORDER.map((g) => {
-        const items = holdings.filter((h) => h.group === g);
-        if (!items.length) return null;
-        const isOpen = !!expanded[g];
-        const gv = items.filter((h) => !h.sold).reduce((s, h) => s + usdValue(h, prices, rate, setP, fundP), 0);
-        const col = groupColor(g);
-        return (
-          <div key={g} style={{ marginBottom: 8 }}>
-            <div className="acc-head" onClick={() => { if (renaming !== g) setExpanded((e) => ({ ...e, [g]: !e[g] })); }}>
-              <div style={{ width: 3, height: 18, borderRadius: 2, background: col, boxShadow: `0 0 8px ${col}80`, flexShrink: 0 }} />
-              <svg className={`chev${isOpen ? " open" : ""}`} width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="9 18 15 12 9 6" /></svg>
-              {renaming === g ? (
-                <input className="ein rename-in" autoFocus value={nameDraft} maxLength={24}
-                  onClick={(e) => e.stopPropagation()}
-                  onChange={(e) => setNameDraft(e.target.value)}
-                  onBlur={finishRename}
-                  onKeyDown={(e) => { if (e.key === "Enter") finishRename(); if (e.key === "Escape") setRenaming(null); }} />
-              ) : (
-                <>
-                  <span style={{ fontWeight: 600, fontSize: 14, fontFamily: "'Sora',sans-serif" }}>{labelOf(g)}</span>
-                  <button className="rename-btn" title="Rename this category" aria-label={`Rename ${labelOf(g)}`}
-                    onClick={(e) => { e.stopPropagation(); startRename(g); }}><PencilIcon /></button>
-                </>
-              )}
-              <span style={{ fontSize: 11, color: "var(--fg4)", fontWeight: 400, whiteSpace: "nowrap" }}>· {items.length} {items.length > 1 ? "assets" : "asset"}</span>
-              {items.some(isStaleManual) && <span className="stale-dot" title="Has values not updated recently" />}
-              <span style={{ marginLeft: "auto", fontFamily: "'JetBrains Mono',monospace", fontSize: 12, color: "var(--fg2)" }}>{fu(gv)}</span>
-            </div>
+      {manual.length > 0 && (
+        <section className="block">
+          <h2>Update your numbers</h2>
+          <p className="muted">These have no live price. Type what each is worth today.</p>
+          {staleCount > 0 && <p className="warn small">{staleCount} {staleCount === 1 ? "value hasn't" : "values haven't"} been updated in over {STALE_DAYS} days.</p>}
+          <div className="list">
+            {manual.map((h) => (
+              <div key={h.id} className="mv-row">
+                <label htmlFor={`mv-${h.id}`} className="row-main">
+                  <span className="row-name">{h.name}</span>
+                  <span className={`row-sub${isStaleManual(h) ? " warn" : ""}`}>{labelOf(h.group)}, {h.valueUpdatedAt ? `updated ${ago(h.valueUpdatedAt)}` : "date unknown"}</span>
+                </label>
+                <span className="money-box">
+                  <span className="muted" aria-hidden="true">{h.ccy === "THB" ? "฿" : "$"}</span>
+                  <NumInput id={`mv-${h.id}`} className="money-in" value={h.value} onChange={(v) => update(h.id, { value: v, valueUpdatedAt: Date.now() })} />
+                </span>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
-            {isOpen && (
-              <div style={{ paddingTop: 8 }}>
-                {items.map((h) => (
-                  <div key={h.id} className="ecard">
-                    <div className="erow">
-                      <div style={{ flex: "2 1 140px" }}>
-                        <span className="elbl">Name</span>
-                        <input className="ein" style={{ fontFamily: "'Sora',sans-serif" }} value={h.name} onChange={(e) => update(h.id, { name: e.target.value })} />
-                      </div>
-                      <div style={{ flex: "1 1 90px" }}>
-                        <span className="elbl">Category</span>
-                        <select className="ein" value={h.group} onChange={(e) => update(h.id, { group: e.target.value })}>
-                          {ORDER.map((x) => <option key={x} value={x}>{labelOf(x)}</option>)}
-                        </select>
-                      </div>
-                      <div style={{ flex: "1 1 90px" }}>
-                        <span className="elbl">Price source</span>
-                        <select className="ein" value={h.type} onChange={(e) => {
-                          const type = e.target.value;
-                          if (type === "live") update(h.id, { type, coin: h.coin || "bitcoin", qty: h.qty || 0, costUSD: h.costUSD || 0 });
-                          else if (type === "set") update(h.id, { type, ticker: h.ticker || "", qty: h.qty || 0, costTHB: h.costTHB || 0 });
-                          else if (type === "fund") {
-                            // Carry over what we know from a manual entry: code from the name, cost in THB,
-                            // and the last value (used to estimate units once the NAV arrives)
-                            const toTHB = (v) => (h.ccy === "USD" ? (+v || 0) * (rate || 1) : +v || 0);
-                            const fromManual = h.type === "manual";
-                            update(h.id, {
-                              type,
-                              fundCode: h.fundCode || String(h.name || "").trim().toUpperCase(),
-                              qty: h.type === "fund" ? h.qty : 0,
-                              costTHB: h.costTHB || (fromManual ? Math.round(toTHB(h.cost) * 100) / 100 : 0),
-                              estimateFromTHB: fromManual && +h.value > 0 ? toTHB(h.value) : undefined,
-                            });
-                          }
-                          else update(h.id, { type, ccy: h.ccy || "USD", cost: h.cost || 0, value: h.value || 0, valueUpdatedAt: Date.now() });
-                        }}>
-                          <option value="live">Live (Crypto)</option>
-                          <option value="set">Live (SET Stock)</option>
-                          <option value="fund">Live (Fund NAV)</option>
-                          <option value="manual">Manual</option>
-                        </select>
-                      </div>
-                      <button className="edel" onClick={() => remove(h.id)} title="Delete" aria-label={`Delete ${h.name}`}><TrashIcon /></button>
+      <section className="block">
+        <h2>All holdings</h2>
+        <p className="muted">Tap a holding to change units or cost, or to record a buy or sale. Tap the pencil to rename a category.</p>
+        <div className="list">
+          {groups.map((g) => {
+            const isOpen = open === g.g;
+            return (
+              <div key={g.g} className="row-wrap">
+                <div className="cat-line">
+                  {renaming === g.g ? (
+                    <div className="rename">
+                      <CatMark g={g.g} color={g.color} />
+                      <input className="field-in rename-in" autoFocus value={nameDraft} maxLength={24} aria-label={`New name for ${g.label}`}
+                        onChange={(e) => setNameDraft(e.target.value)} onBlur={finishRename}
+                        onKeyDown={(e) => { if (e.key === "Enter") finishRename(); if (e.key === "Escape") setRenaming(null); }} />
                     </div>
-                    {h.sold && (
-                      <div className="enote">Marked as sold in an older version, so it isn't counted. Delete it if you no longer hold it.</div>
-                    )}
-
-
-                    {h.type === "live" && (
-                      <div className="erow">
-                        <div style={{ flex: "1 1 100px" }}>
-                          <span className="elbl">Coin</span>
-                          <select className="ein" value={h.coin} onChange={(e) => update(h.id, { coin: e.target.value })}>
-                            {Object.entries(COINS).map(([id, c]) => <option key={id} value={id}>{c.label}</option>)}
-                          </select>
-                        </div>
-                        <div style={{ flex: "1 1 100px" }}>
-                          <span className="elbl">Quantity held</span>
-                          <NumInput className="ein" value={h.qty} onChange={(v) => update(h.id, { qty: v })} />
-                        </div>
-                        <div style={{ flex: "1 1 100px" }}>
-                          <span className="elbl">Cost basis (USD)</span>
-                          <NumInput className="ein" value={h.costUSD} onChange={(v) => update(h.id, { costUSD: v })} />
-                        </div>
-                      </div>
-                    )}
-                    {h.type === "set" && (
-                      <div className="erow">
-                        <div style={{ flex: "1 1 100px" }}>
-                          <span className="elbl">SET Ticker</span>
-                          <input className="ein" value={h.ticker || ""} style={{ fontFamily:"'Sora',sans-serif", textTransform:"uppercase" }} onChange={(e) => update(h.id, { ticker: e.target.value.toUpperCase() })} />
-                        </div>
-                        <div style={{ flex: "1 1 100px" }}>
-                          <span className="elbl">Shares held</span>
-                          <NumInput className="ein" value={h.qty} onChange={(v) => update(h.id, { qty: v })} />
-                        </div>
-                        <div style={{ flex: "1 1 100px" }}>
-                          <span className="elbl">Cost (THB)</span>
-                          <NumInput className="ein" value={h.costTHB || 0} onChange={(v) => update(h.id, { costTHB: v })} />
-                        </div>
-                      </div>
-                    )}
-                    {h.type === "fund" && (
-                      <div className="erow">
-                        <div style={{ flex: "1 1 120px" }}>
-                          <span className="elbl">Fund code</span>
-                          <input className="ein" value={h.fundCode || ""} placeholder="e.g. SCBRM3" style={{ fontFamily:"'Sora',sans-serif", textTransform:"uppercase" }}
-                            onChange={(e) => update(h.id, { fundCode: e.target.value.toUpperCase() })} />
-                        </div>
-                        <div style={{ flex: "1 1 100px" }}>
-                          <span className="elbl">Units held</span>
-                          <NumInput className="ein" value={h.qty} onChange={(v) => update(h.id, { qty: v, unitsEstimated: false, estimateFromTHB: undefined })} />
-                        </div>
-                        <div style={{ flex: "1 1 100px" }}>
-                          <span className="elbl">Cost (THB)</span>
-                          <NumInput className="ein" value={h.costTHB || 0} onChange={(v) => update(h.id, { costTHB: v })} />
-                        </div>
-                      </div>
-                    )}
-                    {h.type === "manual" && (
-                      <div className="erow">
-                        <div style={{ flex: "0 1 75px" }}>
-                          <span className="elbl">Currency</span>
-                          <select className="ein" value={h.ccy} onChange={(e) => update(h.id, { ccy: e.target.value })}>
-                            <option value="USD">USD</option><option value="THB">THB</option>
-                          </select>
-                        </div>
-                        <div style={{ flex: "1 1 100px" }}>
-                          <span className="elbl">Cost ({h.ccy})</span>
-                          <NumInput className="ein" value={h.cost} onChange={(v) => update(h.id, { cost: v })} />
-                        </div>
-                        <div style={{ flex: "1 1 100px" }}>
-                          <span className="elbl">Current value ({h.ccy})</span>
-                          <NumInput className="ein" value={h.value} onChange={(v) => update(h.id, { value: v, valueUpdatedAt: Date.now() })} />
-                        </div>
-                      </div>
-                    )}
-                    {h.note && <div className="enote">{h.note}</div>}
-                    <div className="eval">
-                      → {fu(usdValue(h, prices, rate, setP, fundP))} <span style={{ color: "var(--fg4)" }}>({fthb(usdValue(h, prices, rate, setP, fundP))})</span>
-                      {h.type === "live" && <span style={{ color: "var(--accent)", marginLeft: 8 }}>@ {fu(prices[h.coin] ?? FALLBACK_PRICES[h.coin])}/unit</span>}
-                      {h.type === "set" && setP[h.ticker] && <span style={{ color: "#1FB6C9", marginLeft: 8 }}>@ ฿{setP[h.ticker]}/share · SET</span>}
-                      {h.type === "set" && !setP[h.ticker] && h.ticker && setMode === "live" && setMissing.includes(h.ticker) && (
-                        <span style={{ color: "var(--neg)", marginLeft: 8 }}>No SET price found for "{h.ticker}" — check the ticker</span>
-                      )}
-                      {h.type === "fund" && (() => {
-                        const f = fundP[fundKeyOf(h)];
-                        const unit = fundUnitUSD(f, rate);
-                        if (f && unit != null) {
-                          const asOf = f.date ? new Date(f.date).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : null;
-                          return (
-                            <span style={{ color: "#4A7FD4", marginLeft: 8 }}>
-                              @ ${unit.toFixed(4)}/unit (฿{f.nav}){asOf ? ` · NAV as of ${asOf}` : ""}{f.resolved && f.resolved !== fundKeyOf(h) ? ` · ${f.resolved}` : ""}
-                            </span>
-                          );
-                        }
-                        const usingManual = +h.value > 0 ? " · showing your last manual value for now" : "";
-                        if (fundKeyOf(h) && fundMode === "live" && fundMissing.includes(fundKeyOf(h)))
-                          return <span style={{ color: "var(--neg)", marginLeft: 8 }}>No fund found for "{fundKeyOf(h)}" — check the code{usingManual}</span>;
-                        if (fundMode === "offline" && fundError)
-                          return <span style={{ color: "#E8B923", marginLeft: 8 }}>· {fundError}{usingManual}</span>;
-                        return <span style={{ color: "var(--fg3)", marginLeft: 8 }}>· loading NAV…{usingManual}</span>;
-                      })()}
-                      {h.type === "fund" && h.unitsEstimated && (
-                        <span className="eage stale">· units estimated from your last value — enter the exact number from your SCB app</span>
-                      )}
-                      {h.type === "manual" && (
-                        <span className={isStaleManual(h) ? "eage stale" : "eage"}>
-                          · value {h.valueUpdatedAt ? `updated ${ago(h.valueUpdatedAt)}` : "date unknown — update it to start tracking"}
+                  ) : (
+                    <button type="button" className="row" aria-expanded={isOpen} onClick={() => setOpen(isOpen ? null : g.g)}>
+                      <CatMark g={g.g} color={g.color} />
+                      <span className="row-main">
+                        <span className="row-name strong">{g.label}</span>
+                        <span className="row-sub">{g.all.length} {g.all.length === 1 ? "holding" : "holdings"}</span>
+                      </span>
+                      <span className="row-val">{fu(g.val)}</span>
+                      <Chevron open={isOpen} down />
+                    </button>
+                  )}
+                  <button type="button" className="icon-btn" aria-label={`Rename ${g.label}`} onClick={() => { setRenaming(g.g); setNameDraft(g.label); }}><PencilIcon /></button>
+                </div>
+                {isOpen && (
+                  <div className="sub-list">
+                    {g.all.map((h) => (
+                      <button key={h.id} type="button" className="sub-row" onClick={() => openHolding(h)}>
+                        <span className="row-main">
+                          <span className="sub-name">{h.name}</span>
+                          <span className={`row-sub${isStaleManual(h) ? " warn" : ""}`}>{holdingSub(h)}</span>
                         </span>
-                      )}
-                    </div>
+                        <span className="sub-name">{h.sold ? "" : fu((g.items.find((i) => i.id === h.id) || {}).val || 0)}</span>
+                        <Chevron />
+                      </button>
+                    ))}
                   </div>
-                ))}
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="block">
+        <h2>Backup</h2>
+        <p className="muted">Your holdings are saved on this iPhone only. Save a backup to Files before changing phones.</p>
+        <input ref={fileRef} type="file" accept="application/json,.json" style={{ display: "none" }}
+          onChange={(e) => { importBackup(e.target.files && e.target.files[0]); e.target.value = ""; }} />
+        <div className="two">
+          <button type="button" className="btn-box" onClick={exportBackup}><UploadIcon /> Save backup</button>
+          <button type="button" className="btn-box" onClick={() => fileRef.current && fileRef.current.click()}><DownloadIcon /> Restore</button>
+        </div>
+      </section>
+
+      <section className="block danger">
+        <button type="button" className="btn-text loss" onClick={resetData}>Reset all data</button>
+        <p className="muted small">Replaces everything with the starter list. You can undo for 10 seconds.</p>
+      </section>
+    </>
+  );
+}
+
+// The sheet that slides up when you open a holding. Edits apply when you tap Done.
+function HoldingSheet({ start, isNew, labelOf, rate, prices, setP, fundP, setMode, setMissing, fundMode, fundMissing, fundError, onSave, onClose, onDelete }) {
+  const [d, setD] = useState(start);
+  const [pending, setPending] = useState([]); // buys/sells to record when you tap Done
+  const [trade, setTrade] = useState(null);   // "buy" | "sell"
+  const [tUnits, setTUnits] = useState(0);
+  const [tAmt, setTAmt] = useState(0);
+  const [tErr, setTErr] = useState("");
+  const [ask, setAsk] = useState(null);       // { diff } — cost changed by hand, waiting for "new money?"
+  const [note, setNote] = useState(null);     // { text, flowId, ask }
+  const up = (patch) => setD((x) => ({ ...x, ...patch }));
+  const ccy = costCcy(d);
+  const cf = costField(d);
+  const money = (amt) => (ccy === "THB" ? thb(amt) : fu(amt));
+  const toUSD = (amt) => (ccy === "THB" ? amt / (rate || 1) : amt);
+  const mkFlow = (amt) => ({ id: uid(), at: Date.now(), holdingId: d.id, name: String(d.name || "").trim() || "New asset", usd: round2(toUSD(amt)), thb: round2(ccy === "THB" ? amt : amt * (rate || 1)) });
+  const hasQty = d.type !== "manual";
+  const val = usdValue(d, prices, rate, setP, fundP);
+  const cost = hasCost(d, rate) ? usdCost(d, rate) : null;
+  const pl = cost != null ? val - cost : null;
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.removeEventListener("keydown", onKey); document.body.style.overflow = prev; };
+    // eslint-disable-next-line
+  }, []);
+
+  const unitWord = d.type === "live" ? (COINS[d.coin]?.unit || "units") : d.type === "set" ? "shares" : "units";
+  const openTrade = (kind) => { setTrade(trade === kind ? null : kind); setTUnits(0); setTAmt(0); setTErr(""); setAsk(null); };
+  const applyTrade = () => {
+    const amt = +tAmt || 0, u = +tUnits || 0;
+    if (amt <= 0 || (hasQty && u <= 0)) { setTErr(hasQty ? `Enter the ${unitWord} and the money.` : "Enter an amount."); return; }
+    const curCost = +d[cf] || 0;
+    let f;
+    if (trade === "buy") {
+      if (hasQty) up({ qty: +((+d.qty || 0) + u).toFixed(8), [cf]: round2(curCost + amt), unitsEstimated: false });
+      else up({ value: round2((+d.value || 0) + amt), cost: round2(curCost + amt), valueUpdatedAt: Date.now() });
+      f = mkFlow(amt);
+      setNote({ text: `Bought ${money(amt)}. It counts toward ${monthName()} when you tap Done.`, flowId: f.id });
+    } else {
+      if (hasQty) {
+        const q = +d.qty || 0;
+        if (u > q + 1e-9) { setTErr(`That's more than the ${num(q, 8)} ${unitWord} you hold.`); return; }
+        const left = Math.max(0, q - u);
+        up({ qty: +left.toFixed(8), [cf]: round2(q > 0 ? curCost * left / q : 0) });
+      } else {
+        const v = +d.value || 0;
+        if (amt > v + 1e-9) { setTErr(`That's more than the ${money(v)} it's worth.`); return; }
+        const left = Math.max(0, v - amt);
+        up({ value: round2(left), cost: round2(v > 0 ? curCost * left / v : 0), valueUpdatedAt: Date.now() });
+      }
+      f = mkFlow(-amt);
+      setNote({ text: `Sold ${money(amt)}. It's taken off ${monthName()} when you tap Done.`, flowId: f.id });
+    }
+    setPending((p) => [...p, f]);
+    setTrade(null); setTUnits(0); setTAmt(0); setTErr("");
+  };
+
+  const onCostCommit = (before, after) => {
+    const diff = round2((+after || 0) - (+before || 0));
+    if (Math.abs(diff) >= 0.01) { setAsk({ diff }); setNote(null); }
+  };
+  const answer = (yes) => {
+    if (yes) {
+      const f = mkFlow(ask.diff);
+      setPending((p) => [...p, f]);
+      setNote({ text: ask.diff > 0 ? `Counted as new money: ${money(ask.diff)}.` : `Counted as money taken out: ${money(ask.diff)}.`, flowId: f.id, ask });
+    } else {
+      setNote({ text: "Saved as a fix. Not counted as new money.", flowId: null, ask });
+    }
+    setAsk(null);
+  };
+  const undoNote = () => {
+    if (note && note.flowId) setPending((p) => p.filter((f) => f.id !== note.flowId));
+    if (note && note.ask) setAsk(note.ask);
+    setNote(null);
+  };
+
+  const switchType = (type) => {
+    if (type === "live") up({ type, coin: d.coin || "bitcoin", qty: d.qty || 0, costUSD: d.costUSD || 0 });
+    else if (type === "set") up({ type, ticker: d.ticker || "", qty: d.qty || 0, costTHB: d.costTHB || 0 });
+    else if (type === "fund") {
+      // Carry over what we know from a typed-in value: code from the name, cost in baht,
+      // and the last value (used to estimate units once the fund price arrives)
+      const toTHB = (v) => (d.ccy === "USD" ? (+v || 0) * (rate || 1) : +v || 0);
+      const fromManual = d.type === "manual";
+      up({
+        type,
+        fundCode: d.fundCode || String(d.name || "").trim().toUpperCase(),
+        qty: d.type === "fund" ? d.qty : 0,
+        costTHB: d.costTHB || (fromManual ? round2(toTHB(d.cost)) : 0),
+        estimateFromTHB: fromManual && +d.value > 0 ? toTHB(d.value) : undefined,
+      });
+    } else up({ type, ccy: d.ccy || "USD", cost: d.cost || 0, value: d.value || 0, valueUpdatedAt: Date.now() });
+    setAsk(null);
+  };
+
+  // One or two lines on where the price comes from
+  const priceInfo = (() => {
+    if (d.type === "live") return { text: `${fu(prices[d.coin] ?? FALLBACK_PRICES[d.coin] ?? 0)} per ${COINS[d.coin]?.unit || "unit"}, live price` };
+    if (d.type === "set") {
+      const t = String(d.ticker || "").toUpperCase();
+      if (setP[t]) return { text: `฿${setP[t]} a share on the SET` };
+      if (t && setMode === "live" && setMissing.includes(t)) return { text: `No SET price found for "${t}". Check the ticker.`, warn: true };
+      return { text: t ? "Getting the SET price…" : "Type the SET ticker below." };
+    }
+    if (d.type === "fund") {
+      const key = fundKeyOf(d);
+      const f = fundP[key];
+      if (f && typeof f.nav === "number") {
+        const day = f.date ? new Date(f.date + "T00:00:00").toLocaleDateString("en-US", { weekday: "long", day: "numeric", month: "short" }) : null;
+        return { text: `฿${f.nav} a unit`, sub: day ? `Fund price for ${day}, the latest from the Thai SEC` : null };
+      }
+      if (key && fundMode === "live" && fundMissing.includes(key)) return { text: `No fund found for "${key}". Check the code.`, warn: true };
+      if (fundMode === "offline" && fundError) return { text: fundError, warn: true };
+      return { text: key ? "Getting the fund price…" : "Type the fund code below." };
+    }
+    return { text: d.valueUpdatedAt ? `Value you type in, updated ${ago(d.valueUpdatedAt)}` : "Value you type in" };
+  })();
+
+  const title = String(d.name || "").trim() || (isNew ? "New holding" : "Holding");
+  const field = (id, label, input) => (
+    <div className="f-row"><label htmlFor={id} className="f-lbl">{label}</label>{input}</div>
+  );
+  const moneyField = (id, label, key, onCommit) => field(id, label,
+    <span className="f-money">
+      <span className="muted" aria-hidden="true">{ccy === "THB" ? "฿" : "$"}</span>
+      <NumInput id={id} className="f-in" value={d[key] || 0} onChange={(v) => up({ [key]: v, ...(key === "value" ? { valueUpdatedAt: Date.now() } : {}) })} onCommit={onCommit} />
+    </span>);
+
+  return (
+    <div className="scrim" onClick={onClose}>
+      <div className="sheet" role="dialog" aria-modal="true" aria-label={`${title} details`} onClick={(e) => e.stopPropagation()}>
+        <div className="grabber" aria-hidden="true" />
+        <div className="sheet-bar">
+          <button type="button" className="bar-btn" onClick={onClose}>Cancel</button>
+          <div className="sheet-title">{title}</div>
+          <button type="button" className="bar-btn strong" onClick={() => onSave(d, pending)}>{isNew ? "Add" : "Done"}</button>
+        </div>
+
+        <div className="readout">
+          <div className="ro-n">{fu(val)}</div>
+          <div className="muted">{thb(val * rate)}{d.type !== "manual" && !priceInfo.warn ? `, at ${priceInfo.text}` : ""}</div>
+          {pl != null && <div className="ro-pl" style={{ color: tone(pl) }}>{signed(pl)} ({pctTxt(cost > 0 ? pl / cost * 100 : 0)}) since you bought</div>}
+          {(d.type === "manual" || priceInfo.warn) && <div className={`small ${priceInfo.warn ? "warn" : "muted"}`}>{priceInfo.text}</div>}
+          {priceInfo.sub && <div className="muted small">{priceInfo.sub}</div>}
+          {d.type === "fund" && d.unitsEstimated && <div className="warn small">Units are estimated from your last value. Enter the exact number from your SCB app.</div>}
+        </div>
+
+        <div className="sheet-body">
+          {!isNew && (
+            <div>
+              <div className="two">
+                <button type="button" className={`btn-ink tall${trade === "buy" ? " pressed" : ""}`} aria-expanded={trade === "buy"} onClick={() => openTrade("buy")}><PlusIcon /> I bought more</button>
+                <button type="button" className={`btn-box tall${trade === "sell" ? " pressed" : ""}`} aria-expanded={trade === "sell"} onClick={() => openTrade("sell")}><MinusIcon /> I sold some</button>
+              </div>
+              {trade && (
+                <div className="card trade">
+                  {hasQty && field("t-units", trade === "buy" ? `${unitWord[0].toUpperCase()}${unitWord.slice(1)} bought` : `${unitWord[0].toUpperCase()}${unitWord.slice(1)} sold`,
+                    <NumInput id="t-units" className="f-in" value={tUnits} onChange={setTUnits} />)}
+                  {field("t-amt", trade === "buy" ? (hasQty ? "You paid" : "Amount added") : (hasQty ? "You got" : "Amount taken out"),
+                    <span className="f-money"><span className="muted" aria-hidden="true">{ccy === "THB" ? "฿" : "$"}</span><NumInput id="t-amt" className="f-in" value={tAmt} onChange={setTAmt} /></span>)}
+                  {tErr && <div className="warn small pad">{tErr}</div>}
+                  <div className="pad">
+                    <button type="button" className="btn-ink full" onClick={applyTrade}>{trade === "buy" ? "Add to this holding" : "Take off this holding"}</button>
+                  </div>
+                </div>
+              )}
+              {!trade && <p className="muted small hint">Type the {hasQty ? `${unitWord} and the money` : "amount"}. Folio updates your totals and counts it toward {monthName()}.</p>}
+            </div>
+          )}
+
+          <div className="card">
+            {field("f-name", "Name", <input id="f-name" className="f-in" value={d.name} placeholder="e.g. SCBRM3" onChange={(e) => up({ name: e.target.value })} />)}
+            {field("f-cat", "Category",
+              <select id="f-cat" className="f-in" value={d.group} onChange={(e) => up({ group: e.target.value })}>
+                {ORDER.map((x) => <option key={x} value={x}>{labelOf(x)}</option>)}
+              </select>)}
+            {field("f-type", "Price from",
+              <select id="f-type" className="f-in" value={d.type} onChange={(e) => switchType(e.target.value)}>
+                <option value="live">Crypto or gold, live</option>
+                <option value="set">Thai stock (SET)</option>
+                <option value="fund">Thai fund, daily price</option>
+                <option value="manual">I type the value</option>
+              </select>)}
+          </div>
+
+          <div>
+            <div className="card">
+              {d.type === "live" && (<>
+                {field("f-coin", "Coin",
+                  <select id="f-coin" className="f-in" value={d.coin} onChange={(e) => up({ coin: e.target.value })}>
+                    {Object.entries(COINS).map(([id, c]) => <option key={id} value={id}>{c.label}</option>)}
+                  </select>)}
+                {field("f-qty", "Amount held", <NumInput id="f-qty" className="f-in" value={d.qty} onChange={(v) => up({ qty: v })} />)}
+                {moneyField("f-cost", "Cost", "costUSD", onCostCommit)}
+              </>)}
+              {d.type === "set" && (<>
+                {field("f-tk", "SET ticker", <input id="f-tk" className="f-in caps" value={d.ticker || ""} placeholder="e.g. DELTA" onChange={(e) => up({ ticker: e.target.value.toUpperCase() })} />)}
+                {field("f-qty", "Shares held", <NumInput id="f-qty" className="f-in" value={d.qty} onChange={(v) => up({ qty: v })} />)}
+                {moneyField("f-cost", "Cost", "costTHB", onCostCommit)}
+              </>)}
+              {d.type === "fund" && (<>
+                {field("f-code", "Fund code", <input id="f-code" className="f-in caps" value={d.fundCode || ""} placeholder="e.g. SCBRM3" onChange={(e) => up({ fundCode: e.target.value.toUpperCase() })} />)}
+                {field("f-qty", "Units held", <NumInput id="f-qty" className="f-in" value={d.qty} onChange={(v) => up({ qty: v, unitsEstimated: false, estimateFromTHB: undefined })} />)}
+                {moneyField("f-cost", "Cost", "costTHB", onCostCommit)}
+              </>)}
+              {d.type === "manual" && (<>
+                {field("f-ccy", "Currency",
+                  <select id="f-ccy" className="f-in" value={d.ccy || "USD"} onChange={(e) => up({ ccy: e.target.value })}>
+                    <option value="USD">US dollar</option><option value="THB">Thai baht</option>
+                  </select>)}
+                {moneyField("f-val", "Value now", "value")}
+                {moneyField("f-cost", "Cost", "cost", onCostCommit)}
+              </>)}
+            </div>
+
+            {ask && !isNew && (
+              <div className="card ask" role="group" aria-label="Is this new money?">
+                <div className="ask-q">{ask.diff > 0 ? `Cost went up by ${money(ask.diff)}. Is this new money?` : `Cost went down by ${money(ask.diff)}. Did you sell some?`}</div>
+                <div className="muted small">{ask.diff > 0 ? `New money counts toward Added in ${monthName()}. A fix doesn't.` : `A sale is taken off ${monthName()}. A fix isn't.`}</div>
+                <div className="two">
+                  <button type="button" className="btn-ink" onClick={() => answer(true)}>{ask.diff > 0 ? "Yes, I bought more" : "Yes, I sold some"}</button>
+                  <button type="button" className="btn-box" onClick={() => answer(false)}>No, just fixing it</button>
+                </div>
               </div>
             )}
+            {note && (
+              <div className="card note" role="status">
+                <span>{note.text}</span>
+                <button type="button" className="btn-text" onClick={undoNote}>Undo</button>
+              </div>
+            )}
+            {!ask && !note && <p className="muted small hint">{ccy === "THB" ? "Cost is what you paid in total, in baht." : "Cost is what you paid in total, in dollars."}</p>}
           </div>
-        );
-      })}
 
-      {/* Rarely needed and destructive, so it lives at the very bottom, away from the everyday buttons */}
-      <div className="danger-zone">
-        <div>
-          <div className="danger-title">Reset to built-in data</div>
-          <div className="danger-sub">Erases your holdings on this device. Export a backup first.</div>
+          <div>
+            <button type="button" className="btn-box full loss" onClick={() => (isNew ? onClose() : onDelete(d.id))}>{isNew ? "Discard" : "Delete holding"}</button>
+            {!isNew && <p className="muted small center hint">You can undo for 6 seconds after deleting.</p>}
+          </div>
         </div>
-        <button className="btn-danger" onClick={resetData}><RefreshIcon /> Reset</button>
       </div>
     </div>
   );
 }
 
-const PencilIcon = () => <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>;
-const PieIcon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.21 15.89A10 10 0 1 1 8 2.83" /><path d="M22 12A10 10 0 0 0 12 2v10z" /></svg>;
-const TableIcon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 1-2-2V9m0 0h18" /></svg>;
-const GearIcon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>;
-const PlusIcon = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>;
-const TrashIcon = () => <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>;
-const DownloadIcon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>;
-const UploadIcon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>;
-const RefreshIcon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></svg>;
+const svgP = { fill: "none", stroke: "currentColor", strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": "true" };
+const OverviewIcon = () => <svg width="24" height="24" viewBox="0 0 24 24" strokeWidth="1.8" {...svgP}><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M3 10h18" /><path d="M8 15h4" /></svg>;
+const GainsIcon = () => <svg width="24" height="24" viewBox="0 0 24 24" strokeWidth="1.8" {...svgP}><path d="M3 17l6-6 4 4 8-8" /><path d="M15 7h6v6" /></svg>;
+const ListIcon = () => <svg width="24" height="24" viewBox="0 0 24 24" strokeWidth="1.8" {...svgP}><path d="M8 6h13" /><path d="M8 12h13" /><path d="M8 18h13" /><path d="M3.5 6h.01" /><path d="M3.5 12h.01" /><path d="M3.5 18h.01" /></svg>;
+const PlusIcon = () => <svg width="16" height="16" viewBox="0 0 16 16" strokeWidth="2" {...svgP}><path d="M8 3v10" /><path d="M3 8h10" /></svg>;
+const MinusIcon = () => <svg width="16" height="16" viewBox="0 0 16 16" strokeWidth="2" {...svgP}><path d="M3 8h10" /></svg>;
+const PencilIcon = () => <svg width="17" height="17" viewBox="0 0 16 16" strokeWidth="1.5" {...svgP}><path d="M11 2.5l2.5 2.5L6 12.5 3 13l.5-3z" /></svg>;
+const RefreshIcon = () => <svg width="16" height="16" viewBox="0 0 16 16" strokeWidth="1.6" {...svgP}><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" /><path d="M13.5 2.5v3h-3" /></svg>;
+const UploadIcon = () => <svg width="18" height="18" viewBox="0 0 20 20" strokeWidth="1.6" {...svgP}><path d="M10 13V3" /><path d="M6 7l4-4 4 4" /><path d="M4 11v5h12v-5" /></svg>;
+const DownloadIcon = () => <svg width="18" height="18" viewBox="0 0 20 20" strokeWidth="1.6" {...svgP}><path d="M10 3v10" /><path d="M6 9l4 4 4-4" /><path d="M4 11v5h12v-5" /></svg>;
 
 const CSS = `
-@import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
-.folio-root *, .folio-root *::before, .folio-root *::after { box-sizing:border-box; margin:0; padding:0; }
-.folio-root {
-  --bg:#06080F; --bg-card:rgba(255,255,255,0.032); --bg-inset:rgba(255,255,255,0.018);
-  --bg-raised:rgba(255,255,255,0.052); --bg-row:rgba(255,255,255,0.022);
-  --border:rgba(255,255,255,0.08); --border-hi:rgba(255,255,255,0.16); --border-foc:rgba(247,147,26,0.55);
-  --fg1:#EDEEF2; --fg2:#8A8F9C; --fg3:#4D5467; --fg4:#252933;
-  --pos:#2BD67B; --neg:#FF5C5C; --live:#22C980; --accent:#F7931A;
-  --ease:cubic-bezier(.4,0,.2,1); --t:.18s ease;
-  background:var(--bg); color:var(--fg1); font-family:'Sora',system-ui,sans-serif;
-  -webkit-font-smoothing:antialiased;
-  width:100%; min-height:100vh;
-  position:relative; overflow-x:hidden;
-  display:block;
+.folio, .folio *, .folio *::before, .folio *::after { box-sizing:border-box; }
+.folio {
+  --paper:#EDF1EC; --bar:#F6F8F4; --ink:#17201B; --ink2:#4A554E; --chev:#7B867F;
+  --line:#D3DBD2; --line2:#DEE5DD; --field:#FFFFFF; --field-line:#B9C4B8; --chip-line:#C9D2C8; --seg:#DDE4DB;
+  --gain:#1B7349; --loss:#B8382A; --warn:#8A5A00; --focus:#2D63A8;
+  background:var(--paper); color:var(--ink);
+  font-family:'IBM Plex Sans Thai Looped', system-ui, -apple-system, sans-serif;
+  font-variant-numeric:tabular-nums; -webkit-font-smoothing:antialiased;
+  min-height:100vh; min-height:100dvh;
 }
-.folio-root::after { content:''; position:fixed; inset:0; background-image:radial-gradient(rgba(255,255,255,.04) 1px,transparent 1px); background-size:28px 28px; pointer-events:none; z-index:0; }
-.folio-glow { position:fixed; inset:0; pointer-events:none; z-index:0; background:
-  radial-gradient(ellipse 1500px 560px at 50% -70px, rgba(247,147,26,.13) 0%, rgba(124,92,255,.07) 46%, transparent 68%),
-  radial-gradient(ellipse 900px 700px at -8% 88%, rgba(124,92,255,.08) 0%, transparent 60%),
-  radial-gradient(ellipse 700px 500px at 50% 110%, rgba(31,182,201,.04) 0%, transparent 55%),
-  radial-gradient(ellipse 500px 400px at 96% 72%, rgba(229,72,77,.04) 0%, transparent 52%); }
+.folio button, .folio input, .folio select { font:inherit; color:inherit; }
+.folio button { cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.folio :focus-visible { outline:2px solid var(--focus); outline-offset:2px; }
+.folio h1, .folio h2, .folio p { margin:0; }
 
-.nav { position:sticky; top:0; z-index:100; padding-top:env(safe-area-inset-top); backdrop-filter:blur(24px) saturate(150%); -webkit-backdrop-filter:blur(24px); background:rgba(6,8,15,.82); border-bottom:1px solid var(--border); }
-.nav::after { content:''; position:absolute; bottom:-1px; left:50%; transform:translateX(-50%); width:70%; height:1px; background:linear-gradient(90deg,transparent,rgba(247,147,26,.28),rgba(124,92,255,.18),transparent); pointer-events:none; }
-.nav-inner { max-width:1240px; margin:0 auto; padding:0 44px; height:60px; display:flex; align-items:center; justify-content:space-between; }
-.nav-logo { display:flex; align-items:center; gap:11px; }
-.logo-mark { width:28px; height:28px; border-radius:7px; background:linear-gradient(140deg,rgba(247,147,26,.2),rgba(229,72,77,.08)); border:1px solid rgba(247,147,26,.28); display:flex; align-items:center; justify-content:center; box-shadow:0 0 18px rgba(247,147,26,.18),inset 0 1px 0 rgba(255,255,255,.08); }
-.logo-word { font-size:12px; font-weight:700; letter-spacing:.22em; color:var(--fg1); }
-.nav-right { display:flex; align-items:center; gap:10px; }
-.live-dot { width:6px; height:6px; border-radius:50%; background:var(--live); box-shadow:0 0 0 2px rgba(34,201,128,.16); animation:pls 2.2s ease-in-out infinite; flex-shrink:0; }
-@keyframes pls { 0%,100%{box-shadow:0 0 0 2px rgba(34,201,128,.16)} 50%{box-shadow:0 0 0 5px rgba(34,201,128,.05)} }
-.fx-wrap { display:flex; align-items:center; gap:7px; }
-.fx-label { font-size:11px; color:var(--fg3); }
-.fx-input { background:var(--bg-inset); border:1px solid var(--border); color:var(--fg1); border-radius:7px; padding:5px 9px; width:70px; outline:none; font-family:'JetBrains Mono',monospace; font-size:12px; transition:border-color var(--t); }
-.fx-input:focus { border-color:var(--border-foc); }
-.fx-auto { background:none; border:1px solid rgba(247,147,26,.35); color:var(--accent); border-radius:6px; padding:3px 7px; font-size:10.5px; font-weight:600; font-family:'Sora',sans-serif; cursor:pointer; }
+.screen { max-width:560px; margin:0 auto; padding:calc(env(safe-area-inset-top) + 12px) 20px calc(env(safe-area-inset-bottom) + 112px); }
+.muted { color:var(--ink2); font-size:14px; }
+.small { font-size:13px; }
+.big { font-size:16px; }
+.warn { color:var(--warn); }
+.loss { color:var(--loss) !important; }
+.strong { font-weight:600; }
+.center { text-align:center; }
 
-.ticker { border-bottom:1px solid var(--border); background:rgba(255,255,255,.012); position:relative; z-index:1; }
-.ticker-inner { max-width:1240px; margin:0 auto; padding:0 44px; height:38px; display:flex; align-items:center; gap:28px; overflow-x:auto; scrollbar-width:none; }
-.ticker-inner::-webkit-scrollbar { display:none; }
-.tick-item { display:flex; align-items:center; gap:8px; white-space:nowrap; flex-shrink:0; }
-.tick-sym { font-size:9.5px; font-weight:700; letter-spacing:.12em; }
-.tick-price { font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--fg1); font-weight:500; }
-.tick-chg { font-family:'JetBrains Mono',monospace; font-size:10.5px; }
-.tick-sep { width:1px; height:16px; background:var(--border); flex-shrink:0; }
-.tick-ts { margin-left:auto; font-family:'JetBrains Mono',monospace; font-size:10px; color:var(--fg3); white-space:nowrap; display:flex; align-items:center; gap:6px; flex-shrink:0; background:none; border:none; cursor:pointer; padding:4px 0; }
+.topbar { display:flex; align-items:center; justify-content:space-between; min-height:44px; }
+.wordmark { font-size:20px; font-weight:700; letter-spacing:-.2px; }
+.chip { min-height:44px; padding:0 14px; border:1px solid var(--chip-line); border-radius:22px; background:transparent; font-size:14px; font-weight:500; color:var(--ink2); white-space:nowrap; }
+.chip.strong { color:var(--ink); font-weight:600; }
+.rate-panel { margin-top:10px; padding:12px 14px; background:var(--field); border-radius:12px; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.rate-lbl { font-size:15px; }
+.rate-in { width:96px; }
 
-.page { max-width:1240px; margin:0 auto; padding:52px 44px 110px; position:relative; z-index:1; }
-.hero { margin-bottom:32px; }
-.hero-eyebrow { font-size:11px; font-weight:700; letter-spacing:.22em; text-transform:uppercase; color:var(--accent); margin-bottom:10px; display:flex; align-items:center; gap:10px; }
-.hero-eyebrow::after { content:''; width:32px; height:1px; background:linear-gradient(90deg,rgba(34,201,128,.55),transparent); }
-.hero-card { display:flex; align-items:stretch; border-radius:16px; overflow:hidden; border:1px solid var(--border); border-top-color:var(--border-hi); background:rgba(255,255,255,.032); backdrop-filter:blur(18px); -webkit-backdrop-filter:blur(18px); box-shadow:0 1px 40px rgba(0,0,0,.35),inset 0 1px 0 rgba(255,255,255,.06); }
-.hero-left { flex:1; padding:28px 36px; display:flex; flex-direction:column; justify-content:center; }
-.hero-divider { width:1px; background:var(--border); flex-shrink:0; }
-.hero-right { display:grid; grid-template-columns:1fr 1fr; gap:1px; background:rgba(255,255,255,.04); }
-.hero-stat { background:var(--bg-card); padding:28px 32px; min-width:0; display:flex; flex-direction:column; justify-content:center; transition:background var(--t); }
-.hero-stat:hover { background:var(--bg-raised); }
-.hero-number { font-family:'JetBrains Mono',monospace; font-size:74px; font-weight:700; color:var(--fg1); letter-spacing:-.04em; line-height:1; font-feature-settings:"tnum"; text-shadow:0 0 80px rgba(247,147,26,.14); }
-.hero-thb { font-family:'JetBrains Mono',monospace; font-size:13px; color:var(--fg3); margin-top:6px; }
-.stat-lbl { font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.1em; color:var(--fg1); margin-bottom:7px; }
-.stat-val { font-family:'JetBrains Mono',monospace; font-size:20px; font-weight:600; font-feature-settings:"tnum"; line-height:1.1; }
-.stat-thb { font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--fg3); margin-top:4px; }
+.hero { position:relative; padding:20px 0 22px; }
+.total { font-size:46px; font-weight:600; letter-spacing:-1px; line-height:1.1; margin-top:6px; }
+.stamp { position:absolute; right:2px; top:22px; transform:rotate(-6deg); border:2px solid var(--ink); outline:1px solid var(--ink); outline-offset:-6px; opacity:.8; border-radius:10px; padding:9px 14px; display:flex; flex-direction:column; align-items:center; max-width:150px; text-align:center; }
+.stamp-t { font-size:11px; font-weight:600; }
+.stamp-n { font-size:22px; font-weight:700; line-height:1.15; }
+.stamp-s { font-size:11px; font-weight:500; }
 
-.cat-section { margin-bottom:36px; }
-.cat-cards { display:grid; grid-template-columns:repeat(6,1fr); gap:10px; }
-.cat-card { padding:16px 14px; border-radius:12px; border:1px solid var(--border); border-top-color:var(--border-hi); backdrop-filter:blur(18px); -webkit-backdrop-filter:blur(18px); cursor:default; transition:all .22s ease; }
-.cat-eyebrow-row { font-size:9px; font-weight:700; letter-spacing:.16em; text-transform:uppercase; margin-bottom:11px; display:flex; align-items:center; gap:5px; }
-.cat-dot { width:5px; height:5px; border-radius:50%; flex-shrink:0; }
-.cat-val { font-family:'JetBrains Mono',monospace; font-size:16px; font-weight:700; color:var(--fg1); letter-spacing:-.02em; font-feature-settings:"tnum"; margin-bottom:3px; }
-.cat-thb { font-family:'JetBrains Mono',monospace; font-size:9.5px; color:var(--fg3); margin-bottom:11px; }
-.cat-bar-track { height:3px; background:rgba(255,255,255,.06); border-radius:99px; position:relative; margin-bottom:9px; }
-.cat-bar-fill { position:absolute; top:0; left:0; height:100%; border-radius:99px; }
-.cat-footer { display:flex; justify-content:space-between; align-items:center; }
-.cat-pct { font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:700; }
-.cat-pl { font-family:'JetBrains Mono',monospace; font-size:10px; }
+.pair { border-top:1px solid var(--line); border-bottom:1px solid var(--line); display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); }
+.pair > div { padding:14px 0; min-width:0; }
+.pair > div + div { padding-left:16px; border-left:1px solid var(--line); }
+.pair-n { font-size:18px; font-weight:600; margin-top:2px; }
+.pair-p { font-size:14px; font-weight:500; }
 
-.tabs-row { display:flex; border-bottom:1px solid var(--border); margin-bottom:28px; }
-.tab-btn { background:none; border:none; cursor:pointer; font-family:'Sora',sans-serif; font-size:13px; font-weight:500; color:var(--fg3); padding:11px 22px 13px; border-bottom:2px solid transparent; margin-bottom:-1px; display:flex; align-items:center; gap:7px; transition:color var(--t),border-color var(--t); white-space:nowrap; }
-.tab-btn:hover { color:var(--fg2); }
-.tab-btn.active { color:var(--fg1); border-bottom-color:var(--accent); }
-.tab-short { display:none; }
+.sec-head { padding:28px 0 6px; display:flex; align-items:baseline; justify-content:space-between; }
+.sec-head h2, .block h2 { font-size:18px; font-weight:600; }
+.h-small { font-size:16px !important; }
 
-.card { background:var(--bg-card); border:1px solid var(--border); border-top-color:var(--border-hi); border-radius:13px; backdrop-filter:blur(18px) saturate(140%); -webkit-backdrop-filter:blur(18px) saturate(140%); box-shadow:0 1px 40px rgba(0,0,0,.3),inset 0 1px 0 rgba(255,255,255,.06); }
-.alloc-grid { display:grid; grid-template-columns:340px 1fr; gap:14px; align-items:start; }
-.donut-card { padding:30px 24px; display:flex; flex-direction:column; align-items:center; justify-content:center; }
-.bars-card { padding:26px 30px; min-width:0; }
-.bars-hdr { display:flex; align-items:baseline; justify-content:space-between; margin-bottom:24px; }
-.bars-title { font-size:17px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; color:var(--fg1); }
-.bars-total { font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--fg3); }
-.bar-item { margin-bottom:20px; cursor:default; transition:opacity .18s ease; }
-.bar-item:last-child { margin-bottom:0; }
-.bar-meta { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:9px; }
-.bar-name { display:flex; align-items:center; gap:9px; font-size:15px; font-weight:600; color:var(--fg1); }
-.bar-pip { width:7px; height:7px; border-radius:2px; flex-shrink:0; transition:box-shadow .2s ease; }
-.bar-nums { font-family:'JetBrains Mono',monospace; font-size:14px; display:flex; gap:11px; }
-.bar-pct { color:var(--fg1); font-weight:600; }
-.bar-usd { color:var(--fg3); }
-.bar-track { height:7px; background:rgba(255,255,255,.05); border-radius:99px; position:relative; overflow:visible; }
-.bar-fill { position:absolute; top:0; left:0; height:100%; border-radius:99px; transition:width .55s var(--ease),box-shadow .2s ease; }
-.drill-grid { display:grid; grid-template-columns:160px 1fr; gap:28px; align-items:center; }
-.drill-back { display:flex; align-items:center; gap:5px; background:none; border:1px solid var(--border); border-radius:7px; color:var(--fg3); font-size:12px; padding:4px 11px; cursor:pointer; font-family:'Sora',sans-serif; transition:color .15s,border-color .15s; }
-.drill-back:hover { color:var(--fg1); border-color:var(--border-hi); }
+.donut { margin:12px auto 18px; width:230px; height:230px; border-radius:50%; position:relative; }
+.donut-hole { position:absolute; inset:36px; border-radius:50%; background:var(--paper); display:flex; flex-direction:column; align-items:center; justify-content:center; }
+.donut-name { font-size:24px; font-weight:600; line-height:1.2; max-width:130px; text-align:center; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
-.pnl-card { overflow:hidden; border-radius:13px; }
-.pnl-table { width:100%; border-collapse:collapse; }
-.pnl-table thead tr { border-bottom:1px solid var(--border); }
-.pnl-table th { padding:12px 14px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; color:var(--fg2); text-align:right; background:var(--bg-inset); white-space:nowrap; }
-.pnl-table th:first-child { text-align:left; }
-.pnl-table td { padding:11px 14px; font-family:'JetBrains Mono',monospace; font-size:16px; font-feature-settings:"tnum"; white-space:nowrap; text-align:right; color:var(--fg1); }
-.pnl-table td:first-child { text-align:left; font-family:'Sora',sans-serif; }
-.g-row { cursor:pointer; user-select:none; background:rgba(255,255,255,.02); transition:background var(--t),opacity var(--t); border-top:1px solid rgba(255,255,255,.045); }
-.g-row:hover { background:rgba(255,255,255,.04); }
-.g-row td { padding:13px 18px; }
-.item-row { border-top:1px solid rgba(255,255,255,.025); transition:opacity var(--t); }
-.item-row td { padding:9px 18px 9px 44px; }
-.item-row td:first-child { font-family:'Sora',sans-serif; font-size:15px; }
-.total-row { background:var(--bg-inset); border-top:1px solid var(--border-hi); }
-.total-row td { padding:14px 18px; font-weight:700; font-size:15px; }
-td.muted{color:var(--fg3)} td.dim{color:var(--fg4)} td.pos{color:var(--pos)} td.neg{color:var(--neg)} td.bold{font-weight:700}
-.live-badge { display:inline-block; font-size:9px; font-weight:700; color:var(--accent); border:1px solid rgba(247,147,26,.25); background:rgba(247,147,26,.07); border-radius:4px; padding:1.5px 5px; margin-left:8px; font-family:'JetBrains Mono',monospace; letter-spacing:.07em; vertical-align:middle; }
-.chg-chip { font-family:'JetBrains Mono',monospace; font-size:11px; margin-left:7px; vertical-align:middle; }
-.note-chip { font-size:11px; color:var(--fg4); margin-left:8px; }
-.chev { transition:transform .15s ease; color:var(--fg4); flex-shrink:0; }
-.chev.open { transform:rotate(90deg); color:var(--fg2); }
-.g-name { display:inline-flex; align-items:center; gap:10px; font-family:'Sora',sans-serif; font-size:15px; font-weight:600; }
-.g-dot { width:8px; height:8px; border-radius:2px; flex-shrink:0; }
-.h-ct { font-size:11px; color:var(--fg2); font-weight:400; }
-.ret-bar-wrap { display:flex; align-items:center; gap:8px; justify-content:flex-end; }
-.ret-bar-track { width:48px; height:4px; background:rgba(255,255,255,.06); border-radius:99px; position:relative; flex-shrink:0; }
-.ret-bar-fill { position:absolute; top:0; left:0; height:100%; border-radius:99px; }
-.pnl-note { padding:11px 18px; font-size:10.5px; color:var(--fg4); font-family:'JetBrains Mono',monospace; background:var(--bg-inset); border-top:1px solid rgba(255,255,255,.03); }
+.list { display:flex; flex-direction:column; }
+.row-wrap { border-bottom:1px solid var(--line); }
+.row { width:100%; display:flex; align-items:center; gap:12px; min-height:62px; padding:8px 0; border:0; background:transparent; text-align:left; }
+.mark { width:24px; height:24px; flex:none; display:flex; align-items:center; justify-content:center; }
+.swatch { width:12px; height:12px; border-radius:3px; }
+.swatch.small { width:10px; height:10px; }
+.row-main { flex:1 1 auto; display:flex; flex-direction:column; min-width:0; }
+.row-name { font-size:16px; font-weight:500; overflow-wrap:anywhere; }
+.row-sub { font-size:13px; color:var(--ink2); }
+.row-end { display:flex; flex-direction:column; align-items:flex-end; text-align:right; flex:none; }
+.row-val { font-size:16px; font-weight:500; }
+.chev { flex:none; color:var(--chev); }
+.sub-list { padding:0 0 10px 36px; display:flex; flex-direction:column; }
+.sub-row { width:100%; display:flex; align-items:center; gap:12px; min-height:54px; padding:6px 0; border:0; border-top:1px solid var(--line2); background:transparent; text-align:left; }
+.sub-name { font-size:15px; font-weight:500; }
+.updated { padding-top:14px; display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.btn-text { min-height:44px; padding:0 4px 0 12px; border:0; background:transparent; font-size:14px; font-weight:600; display:inline-flex; align-items:center; gap:6px; }
 
-.edit-hdr { display:flex; justify-content:space-between; align-items:center; margin-bottom:18px; flex-wrap:wrap; gap:12px; }
-.edit-title { font-size:11px; letter-spacing:.18em; color:var(--fg2); text-transform:uppercase; margin-bottom:3px; }
-.edit-sub { font-size:13px; color:var(--fg3); }
-.btn-ghost { display:flex; align-items:center; gap:6px; background:rgba(255,255,255,.04); color:var(--fg2); border:1px solid var(--border); border-radius:9px; padding:8px 12px; font-weight:500; cursor:pointer; font-size:12px; font-family:'Sora',sans-serif; transition:all var(--t); }
-.btn-ghost:hover { color:var(--fg1); border-color:var(--border-hi); }
-.btn-accent { display:flex; align-items:center; gap:6px; background:var(--accent); color:#000; border:none; border-radius:9px; padding:8px 14px; font-weight:600; cursor:pointer; font-size:13px; font-family:'Sora',sans-serif; }
-.add-menu { position:absolute; top:calc(100% + 6px); right:0; z-index:50; background:#0d1017; border:1px solid var(--border-hi); border-radius:11px; padding:6px; min-width:170px; box-shadow:0 12px 40px rgba(0,0,0,.5); animation:plfade .15s ease both; }
-.add-menu-label { font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:var(--fg3); padding:7px 10px 8px; }
-.add-menu-item { display:flex; align-items:center; gap:9px; width:100%; background:none; border:none; color:var(--fg1); font-family:'Sora',sans-serif; font-size:13px; font-weight:500; padding:9px 10px; border-radius:7px; cursor:pointer; text-align:left; transition:background .12s; }
-.add-menu-item:hover { background:var(--bg-raised); }
-.acc-head { display:flex; align-items:center; gap:10px; padding:12px 14px; cursor:pointer; border-radius:11px; border:1px solid var(--border); background:var(--bg-inset); transition:background var(--t); user-select:none; }
-.acc-head:hover { background:var(--bg-raised); }
-.ecard { border:1px solid var(--border); border-radius:11px; padding:12px; margin-bottom:8px; margin-top:8px; background:var(--bg-inset); }
-.erow { display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:8px; }
-.erow:last-child { margin-bottom:0; }
-.elbl { font-size:10px; letter-spacing:.06em; text-transform:uppercase; color:var(--fg3); margin-bottom:5px; display:block; }
-.ein { background:rgba(0,0,0,.32); border:1px solid var(--border); color:var(--fg1); border-radius:8px; padding:8px 10px; outline:none; width:100%; font-family:'JetBrains Mono',monospace; font-size:13px; transition:border-color var(--t); }
-.ein:focus { border-color:var(--border-foc); }
-.edel { background:none; border:none; color:var(--fg3); cursor:pointer; padding:8px 6px; margin-bottom:0; transition:color var(--t); }
-.edit-stale { font-size:11.5px; color:#E8B923; margin-top:6px; }
-.rename-btn { background:none; border:none; color:var(--fg3); cursor:pointer; padding:6px; margin:-6px 0; display:flex; align-items:center; border-radius:6px; transition:color var(--t); }
-.rename-btn:hover { color:var(--fg1); }
-.rename-in { width:auto; flex:0 1 180px; padding:5px 8px; font-family:'Sora',sans-serif; font-size:14px; font-weight:600; }
-.danger-zone { margin-top:28px; padding-top:18px; border-top:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
-.danger-title { font-size:12.5px; font-weight:600; color:var(--fg2); }
-.danger-sub { font-size:11.5px; color:var(--fg3); margin-top:3px; }
-.btn-danger { display:flex; align-items:center; gap:6px; background:none; color:var(--neg); border:1px solid rgba(255,92,92,.35); border-radius:9px; padding:7px 12px; font-weight:600; cursor:pointer; font-size:12px; font-family:'Sora',sans-serif; }
-.btn-danger:hover { background:rgba(255,92,92,.08); }
-.stale-dot { width:6px; height:6px; border-radius:50%; background:#E8B923; flex-shrink:0; }
-.eage { color:var(--fg3); margin-left:8px; }
-.eage.stale { color:#E8B923; }
-.toast { position:fixed; left:50%; bottom:calc(20px + env(safe-area-inset-bottom)); transform:translateX(-50%); z-index:200; display:flex; align-items:center; gap:16px; max-width:calc(100% - 32px); background:#141821; border:1px solid var(--border-hi); border-radius:12px; padding:10px 10px 10px 16px; font-size:13px; color:var(--fg1); box-shadow:0 12px 40px rgba(0,0,0,.55); animation:toastin .2s ease both; }
-.toast span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.toast-btn { background:var(--accent); color:#000; border:none; border-radius:8px; padding:7px 14px; font-weight:700; font-size:13px; font-family:'Sora',sans-serif; cursor:pointer; flex-shrink:0; }
-@keyframes toastin { from{opacity:0;transform:translate(-50%,8px)} to{opacity:1;transform:translate(-50%,0)} }
-.edel:hover { color:var(--neg); }
-.enote { font-size:10.5px; color:var(--fg4); margin-top:7px; line-height:1.5; }
-.eval { font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--fg3); margin-top:7px; }
+.page-head { padding:4px 0 0; }
+.page-head h1 { font-size:30px; font-weight:700; letter-spacing:-.4px; line-height:1.2; }
+.row-between { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.gl-total { margin-top:14px; display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
+.gl-n { font-size:28px; font-weight:600; letter-spacing:-.4px; }
+.gl-p { font-size:16px; font-weight:500; }
+.seg { margin:20px 0 6px; padding:3px; border-radius:12px; background:var(--seg); display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:3px; }
+.seg button { min-height:40px; border:0; border-radius:9px; background:transparent; font-size:14px; font-weight:500; color:var(--ink2); }
+.seg button.on { background:var(--field); color:var(--ink); font-weight:600; box-shadow:0 1px 2px rgba(23,32,27,.12); }
+.g-group { padding-top:22px; }
+.g-head { display:flex; align-items:center; gap:10px; padding-bottom:8px; border-bottom:2px solid var(--ink); }
+.g-name { font-size:18px; font-weight:600; }
+.g-pl { font-size:17px; font-weight:600; }
+.g-row { width:100%; display:flex; align-items:center; gap:12px; min-height:58px; padding:6px 0; border:0; border-bottom:1px solid var(--line); background:transparent; text-align:left; }
+.nc-row { display:flex; align-items:center; gap:12px; min-height:58px; border-bottom:1px solid var(--line); }
 
-.footer { margin-top:60px; text-align:center; font-family:'JetBrains Mono',monospace; font-size:10.5px; color:var(--fg4); letter-spacing:.04em; }
-.pg-fade { animation:pfade .55s ease both; }
-@keyframes pfade { from{opacity:0} to{opacity:1} }
-.panel-fade { animation:plfade .22s ease both; }
-@keyframes plfade { from{opacity:0;transform:translateY(5px)} to{opacity:1;transform:none} }
-.card-in { animation:cin .4s var(--ease) both; }
-@keyframes cin { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:none} }
+.block { padding-top:30px; }
+.block > p { margin-top:2px; }
+.block .list { margin-top:8px; }
+.mv-row { display:flex; align-items:center; gap:12px; min-height:64px; border-bottom:1px solid var(--line); }
+.money-box { display:flex; align-items:center; gap:4px; width:148px; height:46px; flex:none; padding:0 12px; border:1px solid var(--field-line); border-radius:10px; background:var(--field); }
+.money-in { width:100%; min-width:0; border:0; outline:none; background:transparent; font-size:17px; font-weight:500; text-align:right; padding:0; }
+.cat-line { display:flex; align-items:center; gap:4px; }
+.icon-btn { width:44px; height:44px; flex:none; border:0; border-radius:22px; background:transparent; display:flex; align-items:center; justify-content:center; color:var(--ink2); }
+.rename { flex:1 1 auto; display:flex; align-items:center; gap:12px; min-height:62px; }
+.field-in { height:44px; padding:0 12px; border:1px solid var(--field-line); border-radius:10px; background:var(--field); font-size:16px; outline:none; }
+.rename-in { flex:1 1 auto; min-width:0; }
+.picker { margin-top:14px; padding:14px; background:var(--field); border-radius:12px; }
+.picker-grid { margin-top:8px; display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:8px; }
+.picker-btn { min-height:48px; display:flex; align-items:center; gap:10px; padding:0 12px; border:1px solid var(--line); border-radius:10px; background:transparent; font-size:15px; font-weight:500; text-align:left; }
+.two { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:10px; margin-top:12px; }
+.btn-box, .btn-ink, .btn-line { min-height:48px; border-radius:12px; font-size:15px; font-weight:600; display:inline-flex; align-items:center; justify-content:center; gap:8px; padding:0 14px; }
+.btn-box { border:1px solid var(--field-line); background:var(--field); }
+.btn-ink { border:0; background:var(--ink); color:var(--bar) !important; }
+.btn-line { min-height:44px; border:1px solid var(--chip-line); background:transparent; font-size:14px; }
+.page-head .btn-ink { min-height:44px; border-radius:22px; padding:0 16px 0 12px; }
+.tall { min-height:52px; font-size:16px; }
+.full { width:100%; }
+.pressed { outline:2px solid var(--ink); outline-offset:2px; }
+.danger { padding-top:40px; }
 
-@media(max-width:1100px){ .cat-cards{grid-template-columns:repeat(3,1fr)} }
-@media(max-width:860px){
-  .page{padding:28px 16px 80px} .nav-inner,.ticker-inner{padding:0 16px} .hero{margin-bottom:20px}
-  .alloc-grid{grid-template-columns:1fr} .hero-card{flex-direction:column} .hero-left{padding:20px 20px 14px}
-  .hero-divider{width:auto;height:1px} .hero-right{grid-template-columns:1fr 1fr} .hero-stat{padding:16px 20px}
-  .cat-cards{grid-template-columns:repeat(2,1fr)} .hero-number{font-size:36px} .drill-grid{grid-template-columns:1fr;gap:18px;justify-items:center}
-  .stat-val{font-size:16px} .stat-lbl{font-size:10px}
-}
-@media(max-width:640px){
-  .tab-long{display:none} .tab-short{display:inline}
-  .tab-btn{flex:1;justify-content:center;padding:11px 6px 13px}
-  .pnl-table td,.pnl-table th{padding:10px 8px;font-size:13px}
-  .pnl-table th{font-size:9px;letter-spacing:.03em}
-  .g-row td{padding:11px 6px} .item-row td{padding-left:10px}
-  .g-name{font-size:14px;gap:5px} .h-ct{display:none}
-  .g-dot,.bar-pip{width:6px;height:6px}
-  .hero-right{grid-template-columns:1fr 1fr} .hero-stat{padding:14px 16px}
-  .stat-val{font-size:15px} .hero-number{font-size:32px}
-  .chg-chip,.note-chip,.live-badge{display:none}
-  /* keep all 5 columns: horizontal scroll with sticky asset column */
-  .pnl-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;}
-  .pnl-table{min-width:600px;}
-  .pnl-table td:first-child,.pnl-table th:first-child{
-    position:sticky;left:0;z-index:2;background:var(--bg);
-    box-shadow:1px 0 0 var(--border);
-    width:118px;min-width:118px;max-width:118px;
-    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
-    font-size:12px;padding-left:10px;padding-right:6px;
-  }
-  .pnl-table thead th:first-child{background:var(--bg-inset);}
-  .g-row td:first-child{background:#0a0c14;}
-  .item-row td:first-child{background:#080a11;padding-left:10px;font-size:11px;}
-  .total-row td:first-child{background:var(--bg-inset);}
-}
-@media(max-width:420px){
-  .hero-stat{padding:10px 16px} .hero-number{font-size:28px}
-  .stat-val{font-size:14px} .stat-thb{font-size:10px}
-}
+.tabbar { position:fixed; left:0; right:0; bottom:0; z-index:20; background:var(--bar); border-top:1px solid var(--line); display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); padding:8px 12px calc(env(safe-area-inset-bottom) + 8px); }
+.tab { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; min-height:48px; border:0; background:transparent; font-size:12px; font-weight:500; color:#5E6962; }
+.tab.on { color:var(--ink); font-weight:600; }
+
+.toast { position:fixed; left:50%; bottom:calc(env(safe-area-inset-bottom) + 84px); transform:translateX(-50%); z-index:40; background:var(--ink); color:var(--bar); border-radius:12px; padding:6px 6px 6px 16px; display:flex; align-items:center; gap:12px; font-size:14px; box-shadow:0 6px 20px rgba(23,32,27,.25); max-width:calc(100% - 32px); }
+.toast-btn { min-height:40px; padding:0 14px; border:0; border-radius:9px; background:rgba(255,255,255,.14); color:var(--bar) !important; font-weight:600; }
+
+.scrim { position:fixed; inset:0; z-index:30; background:rgba(23,32,27,.45); }
+.sheet { position:absolute; left:0; right:0; bottom:0; top:calc(env(safe-area-inset-top) + 40px); max-width:560px; margin:0 auto; background:var(--paper); border-radius:14px 14px 0 0; overflow-y:auto; -webkit-overflow-scrolling:touch; padding-bottom:calc(env(safe-area-inset-bottom) + 24px); animation:sheet-up .24s cubic-bezier(.2,.8,.2,1); }
+@keyframes sheet-up { from { transform:translateY(40px); opacity:.6; } to { transform:none; opacity:1; } }
+.grabber { width:36px; height:5px; border-radius:3px; background:var(--field-line); margin:6px auto 0; }
+.sheet-bar { display:grid; grid-template-columns:1fr auto 1fr; align-items:center; padding:2px 8px 0; position:sticky; top:0; background:var(--paper); z-index:1; }
+.bar-btn { min-height:44px; padding:0 12px; border:0; background:transparent; font-size:16px; color:var(--ink2); justify-self:start; }
+.bar-btn.strong { color:var(--ink); font-weight:700; justify-self:end; }
+.sheet-title { font-size:17px; font-weight:600; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:center; }
+.readout { padding:16px 20px 18px; border-bottom:1px solid var(--line); display:flex; flex-direction:column; gap:2px; }
+.ro-n { font-size:36px; font-weight:600; letter-spacing:-.6px; line-height:1.15; }
+.ro-pl { font-size:15px; font-weight:500; margin-top:6px; }
+.sheet-body { padding:18px 16px 0; display:flex; flex-direction:column; gap:18px; }
+.card { background:var(--field); border-radius:12px; display:flex; flex-direction:column; }
+.f-row { display:flex; align-items:center; gap:12px; min-height:52px; padding:0 16px; border-bottom:1px solid #E3E8E2; }
+.card > .f-row:last-child { border-bottom:0; }
+.f-lbl { font-size:16px; flex:none; width:110px; }
+.f-in { flex:1 1 auto; min-width:0; width:100%; border:0; outline:none; background:transparent; font-size:16px; text-align:right; padding:0; -webkit-appearance:none; appearance:none; }
+select.f-in { text-align-last:right; color:var(--ink2); }
+.f-in.caps { text-transform:uppercase; }
+.f-money { flex:1 1 auto; display:flex; justify-content:flex-end; align-items:center; gap:2px; min-width:0; }
+.f-money .f-in { flex:0 1 150px; width:150px; }
+.hint { padding:6px 4px 0; }
+.trade { margin-top:10px; }
+.pad { padding:10px 16px 14px; }
+.ask { margin-top:10px; padding:14px; border:1px solid var(--field-line); gap:4px; }
+.ask-q { font-size:16px; font-weight:600; }
+.ask .two { margin-top:10px; gap:8px; }
+.ask .btn-ink, .ask .btn-box { min-height:46px; border-radius:10px; font-size:14px; padding:0 8px; white-space:nowrap; }
+.note { margin-top:10px; padding:4px 8px 4px 14px; flex-direction:row; align-items:center; gap:10px; border:1px solid var(--line); font-size:14px; }
+.note > span { flex:1 1 auto; padding:8px 0; }
+
+@media (prefers-reduced-motion: reduce) { .sheet { animation:none; } }
 `;
