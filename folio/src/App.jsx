@@ -166,7 +166,16 @@ export default function App() {
   const [selected, setSelected] = useState(null);
   const [expanded, setExpanded] = useState({});
   const [loaded, setLoaded] = useState(false);
-  const [undo, setUndo] = useState(null); // { h, idx } for the last deleted holding
+  const [undo, setUndo] = useState(null); // { kind: "delete", h, idx } or { kind: "reset", holdings }
+  // Your own names for the categories (e.g. "ETF" → "Mutual funds"); empty = the built-in name
+  const [groupLabels, setGroupLabels] = useState({});
+  const labelOf = (g) => String(groupLabels[g] || "").trim() || GROUPS_META[g]?.label || g;
+  const renameGroup = (g, name) => setGroupLabels((l) => {
+    const next = { ...l };
+    const clean = String(name || "").trim().slice(0, 24);
+    if (!clean || clean === GROUPS_META[g]?.label) delete next[g]; else next[g] = clean;
+    return next;
+  });
   const undoTimer = useRef(null);
 
   // SET stock prices — keyed by ticker (THB), seeded with last known prices
@@ -254,6 +263,7 @@ export default function App() {
         if (raw) {
           const d = JSON.parse(raw);
           if (Array.isArray(d.holdings)) setHoldings(d.holdings);
+          if (d.groupLabels && typeof d.groupLabels === "object") setGroupLabels(d.groupLabels);
           // Only keep a saved rate if you typed it yourself; otherwise it refreshes from the live feed
           if (d.rateManual === true && typeof d.rate === "number" && d.rate > 0) { setRate(d.rate); setRateManual(true); }
         }
@@ -266,7 +276,7 @@ export default function App() {
     if (!loaded) return;
     (async () => {
       try {
-        const payload = JSON.stringify({ holdings, rate, rateManual });
+        const payload = JSON.stringify({ holdings, rate, rateManual, groupLabels });
         if (typeof window !== "undefined" && window.localStorage) {
           window.localStorage.setItem(STORAGE_KEY, payload);
         }
@@ -275,7 +285,7 @@ export default function App() {
         }
       } catch (e) { /* session only */ }
     })();
-  }, [holdings, rate, rateManual, loaded]);
+  }, [holdings, rate, rateManual, groupLabels, loaded]);
 
   // Remember the latest prices so the next visit opens with them
   useEffect(() => {
@@ -416,8 +426,8 @@ export default function App() {
       chg: h.type === "live" ? changes[h.coin] : undefined,
       note: h.sold ? "Sold" : h.note,
     }));
-    return { g, label: GROUPS_META[g].label, color: GROUPS_META[g].color, val, cost, items: itemRows };
-  }).filter((r) => r.items.length > 0), [holdings, prices, rate, changes, setP, fundP]);
+    return { g, label: labelOf(g), color: GROUPS_META[g].color, val, cost, items: itemRows };
+  }).filter((r) => r.items.length > 0), [holdings, prices, rate, changes, setP, fundP, groupLabels]);
 
   const totalVal = groups.reduce((s, r) => s + r.val, 0);
   const basisCost = holdings.filter((h) => hasCost(h, rate)).reduce((s, h) => s + usdCost(h, rate), 0);
@@ -442,15 +452,20 @@ export default function App() {
   const remove = (id) => {
     const idx = holdings.findIndex((h) => h.id === id);
     if (idx < 0) return;
-    setUndo({ h: holdings[idx], idx });
+    setUndo({ kind: "delete", h: holdings[idx], idx });
     setHoldings((hs) => hs.filter((h) => h.id !== id));
     clearTimeout(undoTimer.current);
     undoTimer.current = setTimeout(() => setUndo(null), 6000);
   };
-  const undoDelete = () => {
+  const undoLast = () => {
     if (!undo) return;
-    setHoldings((hs) => { const next = [...hs]; next.splice(Math.min(undo.idx, next.length), 0, undo.h); return next; });
-    setExpanded((e) => ({ ...e, [undo.h.group]: true }));
+    if (undo.kind === "reset") {
+      setHoldings(undo.holdings);
+      setGroupLabels(undo.groupLabels || {});
+    } else {
+      setHoldings((hs) => { const next = [...hs]; next.splice(Math.min(undo.idx, next.length), 0, undo.h); return next; });
+      setExpanded((e) => ({ ...e, [undo.h.group]: true }));
+    }
     clearTimeout(undoTimer.current);
     setUndo(null);
   };
@@ -459,12 +474,20 @@ export default function App() {
     setHoldings((hs) => [...hs, { id: uid(), name: "New asset", group, type: "manual", ccy: "USD", cost: 0, value: 0, valueUpdatedAt: Date.now() }]);
     setExpanded((e) => ({ ...e, [group]: true })); // open that group so the new row is visible
   };
-  const resetData = () => { if (typeof window !== "undefined" && window.confirm("Reset all holdings to the latest data set? This replaces what's saved on this device.")) setHoldings(SEED_HOLDINGS); };
+  const resetData = () => {
+    if (typeof window === "undefined") return;
+    if (!window.confirm("Erase all your holdings on this device and go back to the app's built-in data?\n\nExport a backup first if you want to keep them. You'll have 10 seconds to undo.")) return;
+    setUndo({ kind: "reset", holdings, groupLabels });
+    setHoldings(SEED_HOLDINGS);
+    setGroupLabels({});
+    clearTimeout(undoTimer.current);
+    undoTimer.current = setTimeout(() => setUndo(null), 10000);
+  };
 
   // ── Backup: export holdings to a .json file / import one back ──
   const exportBackup = () => {
     try {
-      const payload = JSON.stringify({ app: "folio", version: 7, exportedAt: new Date().toISOString(), rate, rateManual, holdings }, null, 2);
+      const payload = JSON.stringify({ app: "folio", version: 7, exportedAt: new Date().toISOString(), rate, rateManual, groupLabels, holdings }, null, 2);
       const d = new Date();
       const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
       const filename = `folio-backup-${stamp}.json`;
@@ -508,6 +531,7 @@ export default function App() {
         const when = d.exportedAt ? new Date(d.exportedAt).toLocaleString() : "unknown date";
         if (!window.confirm(`Restore backup from ${when} (${d.holdings.length} holdings)? This replaces what's saved on this device.`)) return;
         setHoldings(d.holdings);
+        if (d.groupLabels && typeof d.groupLabels === "object") setGroupLabels(d.groupLabels);
         if (d.rateManual === true && typeof d.rate === "number" && d.rate > 0) { setRate(d.rate); setRateManual(true); }
         else setRateManual(false);
         window.alert("Backup restored.");
@@ -536,12 +560,6 @@ export default function App() {
             <span className="logo-word" style={{ color:"#22C980" }}>FOLIO</span>
           </div>
           <div className="nav-right">
-            <button className="nav-pill" onClick={fetchPrices} title="Refresh prices"
-              style={{ cursor: "pointer", background: "none", color: "var(--live)" }}>
-              {priceMode === "live" && <span className="live-dot" />}
-              <span style={{ fontSize: 12 }}>{priceMode === "live" ? "Live prices" : priceMode === "offline" ? "Offline" : "Loading…"}</span>
-            </button>
-            <div className="nav-sep" />
             <div className="fx-wrap">
               <span className="fx-label">USD/THB</span>
               <NumInput className="fx-input" value={rate} onChange={(v) => { if (v > 0) { setRateManual(true); setRate(v); } }} />
@@ -565,7 +583,11 @@ export default function App() {
               </div>
             </React.Fragment>
           ))}
-          <div className="tick-ts">{priceMode === "live" && <span className="live-dot" />}{updatedAt ? updatedAt.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) : "—"}</div>
+          <button className="tick-ts" onClick={fetchPrices} title="Prices last updated — tap to refresh">
+            {priceMode === "live" && <span className="live-dot" />}
+            {priceMode === "offline" ? "offline · " : ""}
+            {updatedAt ? updatedAt.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }) : "—"}
+          </button>
         </div>
       </div>
 
@@ -614,6 +636,7 @@ export default function App() {
           {tab === "edit" && (
             <EditHoldings holdings={holdings} expanded={expanded} setExpanded={setExpanded}
               update={update} remove={remove} addHolding={addHolding} resetData={resetData}
+              labelOf={labelOf} renameGroup={renameGroup}
               exportBackup={exportBackup} importBackup={importBackup} prices={prices} rate={rate} fthb={fthb} setP={setP}
               setMode={setMode} setMissing={setMissing} fundP={fundP} fundMode={fundMode} fundMissing={fundMissing} fundError={fundError} />
           )}
@@ -624,8 +647,10 @@ export default function App() {
 
       {undo && (
         <div className="toast" role="status">
-          <span>Deleted <b>{undo.h.name}</b></span>
-          <button className="toast-btn" onClick={undoDelete}>Undo</button>
+          {undo.kind === "reset"
+            ? <span>All holdings reset to built-in data</span>
+            : <span>Deleted <b>{undo.h.name}</b></span>}
+          <button className="toast-btn" onClick={undoLast}>Undo</button>
         </div>
       )}
     </div>
@@ -890,9 +915,13 @@ function PnLTable({ groups, grand, hov, onHov }) {
   );
 }
 
-function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHolding, resetData, exportBackup, importBackup, prices, rate, fthb, setP, setMode, setMissing, fundP, fundMode, fundMissing, fundError }) {
+function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHolding, resetData, labelOf, renameGroup, exportBackup, importBackup, prices, rate, fthb, setP, setMode, setMissing, fundP, fundMode, fundMissing, fundError }) {
   const [showAdd, setShowAdd] = React.useState(false);
+  const [renaming, setRenaming] = React.useState(null); // category key being renamed
+  const [nameDraft, setNameDraft] = React.useState("");
   const fileRef = React.useRef(null);
+  const startRename = (g) => { setRenaming(g); setNameDraft(labelOf(g)); };
+  const finishRename = () => { if (renaming) renameGroup(renaming, nameDraft); setRenaming(null); };
   const staleCount = holdings.filter(isStaleManual).length;
   return (
     <div className="card" style={{ padding: 22 }}>
@@ -909,7 +938,6 @@ function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHold
             onChange={(e) => { importBackup(e.target.files && e.target.files[0]); e.target.value = ""; }} />
           <button className="btn-ghost" onClick={exportBackup}><DownloadIcon /> Export backup</button>
           <button className="btn-ghost" onClick={() => fileRef.current && fileRef.current.click()}><UploadIcon /> Import backup</button>
-          <button className="btn-ghost" onClick={resetData}><RefreshIcon /> Reset data</button>
           <button className="btn-accent" onClick={() => setShowAdd((s) => !s)}><PlusIcon /> Add asset</button>
           {showAdd && (
             <div className="add-menu">
@@ -917,7 +945,7 @@ function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHold
               {ORDER.map((g) => (
                 <button key={g} className="add-menu-item" onClick={() => { addHolding(g); setShowAdd(false); }}>
                   <span style={{ width: 8, height: 8, borderRadius: 2, background: groupColor(g), boxShadow: `0 0 6px ${groupColor(g)}`, display: "inline-block", flexShrink: 0 }} />
-                  {GROUPS_META[g].label}
+                  {labelOf(g)}
                 </button>
               ))}
             </div>
@@ -933,11 +961,23 @@ function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHold
         const col = groupColor(g);
         return (
           <div key={g} style={{ marginBottom: 8 }}>
-            <div className="acc-head" onClick={() => setExpanded((e) => ({ ...e, [g]: !e[g] }))}>
+            <div className="acc-head" onClick={() => { if (renaming !== g) setExpanded((e) => ({ ...e, [g]: !e[g] })); }}>
               <div style={{ width: 3, height: 18, borderRadius: 2, background: col, boxShadow: `0 0 8px ${col}80`, flexShrink: 0 }} />
               <svg className={`chev${isOpen ? " open" : ""}`} width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="9 18 15 12 9 6" /></svg>
-              <span style={{ fontWeight: 600, fontSize: 14, fontFamily: "'Sora',sans-serif" }}>{GROUPS_META[g].label}</span>
-              <span style={{ fontSize: 11, color: "var(--fg4)", fontWeight: 400 }}>· {items.length} {items.length > 1 ? "assets" : "asset"}</span>
+              {renaming === g ? (
+                <input className="ein rename-in" autoFocus value={nameDraft} maxLength={24}
+                  onClick={(e) => e.stopPropagation()}
+                  onChange={(e) => setNameDraft(e.target.value)}
+                  onBlur={finishRename}
+                  onKeyDown={(e) => { if (e.key === "Enter") finishRename(); if (e.key === "Escape") setRenaming(null); }} />
+              ) : (
+                <>
+                  <span style={{ fontWeight: 600, fontSize: 14, fontFamily: "'Sora',sans-serif" }}>{labelOf(g)}</span>
+                  <button className="rename-btn" title="Rename this category" aria-label={`Rename ${labelOf(g)}`}
+                    onClick={(e) => { e.stopPropagation(); startRename(g); }}><PencilIcon /></button>
+                </>
+              )}
+              <span style={{ fontSize: 11, color: "var(--fg4)", fontWeight: 400, whiteSpace: "nowrap" }}>· {items.length} {items.length > 1 ? "assets" : "asset"}</span>
               {items.some(isStaleManual) && <span className="stale-dot" title="Has values not updated recently" />}
               <span style={{ marginLeft: "auto", fontFamily: "'JetBrains Mono',monospace", fontSize: 12, color: "var(--fg2)" }}>{fu(gv)}</span>
             </div>
@@ -954,7 +994,7 @@ function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHold
                       <div style={{ flex: "1 1 90px" }}>
                         <span className="elbl">Category</span>
                         <select className="ein" value={h.group} onChange={(e) => update(h.id, { group: e.target.value })}>
-                          {ORDER.map((x) => <option key={x} value={x}>{GROUPS_META[x].label}</option>)}
+                          {ORDER.map((x) => <option key={x} value={x}>{labelOf(x)}</option>)}
                         </select>
                       </div>
                       <div style={{ flex: "1 1 90px" }}>
@@ -1102,10 +1142,20 @@ function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHold
           </div>
         );
       })}
+
+      {/* Rarely needed and destructive, so it lives at the very bottom, away from the everyday buttons */}
+      <div className="danger-zone">
+        <div>
+          <div className="danger-title">Reset to built-in data</div>
+          <div className="danger-sub">Erases your holdings on this device. Export a backup first.</div>
+        </div>
+        <button className="btn-danger" onClick={resetData}><RefreshIcon /> Reset</button>
+      </div>
     </div>
   );
 }
 
+const PencilIcon = () => <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>;
 const PieIcon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.21 15.89A10 10 0 1 1 8 2.83" /><path d="M22 12A10 10 0 0 0 12 2v10z" /></svg>;
 const TableIcon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 1-2-2V9m0 0h18" /></svg>;
 const GearIcon = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>;
@@ -1145,10 +1195,8 @@ const CSS = `
 .logo-mark { width:28px; height:28px; border-radius:7px; background:linear-gradient(140deg,rgba(247,147,26,.2),rgba(229,72,77,.08)); border:1px solid rgba(247,147,26,.28); display:flex; align-items:center; justify-content:center; box-shadow:0 0 18px rgba(247,147,26,.18),inset 0 1px 0 rgba(255,255,255,.08); }
 .logo-word { font-size:12px; font-weight:700; letter-spacing:.22em; color:var(--fg1); }
 .nav-right { display:flex; align-items:center; gap:10px; }
-.nav-pill { display:flex; align-items:center; gap:7px; padding:5px 13px; border:1px solid var(--border); border-radius:99px; font-size:11.5px; }
 .live-dot { width:6px; height:6px; border-radius:50%; background:var(--live); box-shadow:0 0 0 2px rgba(34,201,128,.16); animation:pls 2.2s ease-in-out infinite; flex-shrink:0; }
 @keyframes pls { 0%,100%{box-shadow:0 0 0 2px rgba(34,201,128,.16)} 50%{box-shadow:0 0 0 5px rgba(34,201,128,.05)} }
-.nav-sep { width:1px; height:20px; background:var(--border); }
 .fx-wrap { display:flex; align-items:center; gap:7px; }
 .fx-label { font-size:11px; color:var(--fg3); }
 .fx-input { background:var(--bg-inset); border:1px solid var(--border); color:var(--fg1); border-radius:7px; padding:5px 9px; width:70px; outline:none; font-family:'JetBrains Mono',monospace; font-size:12px; transition:border-color var(--t); }
@@ -1163,7 +1211,7 @@ const CSS = `
 .tick-price { font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--fg1); font-weight:500; }
 .tick-chg { font-family:'JetBrains Mono',monospace; font-size:10.5px; }
 .tick-sep { width:1px; height:16px; background:var(--border); flex-shrink:0; }
-.tick-ts { margin-left:auto; font-family:'JetBrains Mono',monospace; font-size:10px; color:var(--fg3); white-space:nowrap; display:flex; align-items:center; gap:6px; flex-shrink:0; }
+.tick-ts { margin-left:auto; font-family:'JetBrains Mono',monospace; font-size:10px; color:var(--fg3); white-space:nowrap; display:flex; align-items:center; gap:6px; flex-shrink:0; background:none; border:none; cursor:pointer; padding:4px 0; }
 
 .page { max-width:1240px; margin:0 auto; padding:52px 44px 110px; position:relative; z-index:1; }
 .hero { margin-bottom:32px; }
@@ -1270,6 +1318,14 @@ td.muted{color:var(--fg3)} td.dim{color:var(--fg4)} td.pos{color:var(--pos)} td.
 .ein:focus { border-color:var(--border-foc); }
 .edel { background:none; border:none; color:var(--fg3); cursor:pointer; padding:8px 6px; margin-bottom:0; transition:color var(--t); }
 .edit-stale { font-size:11.5px; color:#E8B923; margin-top:6px; }
+.rename-btn { background:none; border:none; color:var(--fg3); cursor:pointer; padding:6px; margin:-6px 0; display:flex; align-items:center; border-radius:6px; transition:color var(--t); }
+.rename-btn:hover { color:var(--fg1); }
+.rename-in { width:auto; flex:0 1 180px; padding:5px 8px; font-family:'Sora',sans-serif; font-size:14px; font-weight:600; }
+.danger-zone { margin-top:28px; padding-top:18px; border-top:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+.danger-title { font-size:12.5px; font-weight:600; color:var(--fg2); }
+.danger-sub { font-size:11.5px; color:var(--fg3); margin-top:3px; }
+.btn-danger { display:flex; align-items:center; gap:6px; background:none; color:var(--neg); border:1px solid rgba(255,92,92,.35); border-radius:9px; padding:7px 12px; font-weight:600; cursor:pointer; font-size:12px; font-family:'Sora',sans-serif; }
+.btn-danger:hover { background:rgba(255,92,92,.08); }
 .stale-dot { width:6px; height:6px; border-radius:50%; background:#E8B923; flex-shrink:0; }
 .eage { color:var(--fg3); margin-left:8px; }
 .eage.stale { color:#E8B923; }
