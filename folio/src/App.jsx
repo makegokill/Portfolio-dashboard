@@ -564,8 +564,8 @@ export default function App() {
 
   const TABS = [
     { k: "overview", label: "Overview", Icon: OverviewIcon },
-    { k: "gains",    label: "Gains",    Icon: GainsIcon },
     { k: "holdings", label: "Holdings", Icon: ListIcon },
+    { k: "gains",    label: "Gains",    Icon: GainsIcon },
   ];
 
   return (
@@ -909,28 +909,6 @@ function Holdings({ holdings, groups, labelOf, renameGroup, rate, update, openHo
         </div>
       )}
 
-      {manual.length > 0 && (
-        <section className="block">
-          <h2>Update your numbers</h2>
-          <p className="muted">These have no live price. Type what each is worth today.</p>
-          {staleCount > 0 && <p className="warn small">{staleCount} {staleCount === 1 ? "value hasn't" : "values haven't"} been updated in over {STALE_DAYS} days.</p>}
-          <div className="list">
-            {manual.map((h) => (
-              <div key={h.id} className="mv-row">
-                <label htmlFor={`mv-${h.id}`} className="row-main">
-                  <span className="row-name">{h.name}</span>
-                  <span className={`row-sub${isStaleManual(h) ? " warn" : ""}`}>{labelOf(h.group)}, {h.valueUpdatedAt ? `updated ${ago(h.valueUpdatedAt)}` : "date unknown"}</span>
-                </label>
-                <span className="money-box">
-                  <span className="muted" aria-hidden="true">{h.ccy === "THB" ? "฿" : "$"}</span>
-                  <NumInput id={`mv-${h.id}`} className="money-in" value={h.value} onChange={(v) => update(h.id, { value: v, valueUpdatedAt: Date.now() })} />
-                </span>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
-
       <section className="block">
         <h2>All holdings</h2>
         <p className="muted">Tap a holding to change units or cost, or to record a buy or sale. Tap the pencil to rename a category.</p>
@@ -979,6 +957,28 @@ function Holdings({ holdings, groups, labelOf, renameGroup, rate, update, openHo
           })}
         </div>
       </section>
+
+      {manual.length > 0 && (
+        <section className="block">
+          <h2>Update your numbers</h2>
+          <p className="muted">These have no live price. Type what each is worth today.</p>
+          {staleCount > 0 && <p className="warn small">{staleCount} {staleCount === 1 ? "value hasn't" : "values haven't"} been updated in over {STALE_DAYS} days.</p>}
+          <div className="list">
+            {manual.map((h) => (
+              <div key={h.id} className="mv-row">
+                <label htmlFor={`mv-${h.id}`} className="row-main">
+                  <span className="row-name">{h.name}</span>
+                  <span className={`row-sub${isStaleManual(h) ? " warn" : ""}`}>{labelOf(h.group)}, {h.valueUpdatedAt ? `updated ${ago(h.valueUpdatedAt)}` : "date unknown"}</span>
+                </label>
+                <span className="money-box">
+                  <span className="muted" aria-hidden="true">{h.ccy === "THB" ? "฿" : "$"}</span>
+                  <NumInput id={`mv-${h.id}`} className="money-in" value={h.value} onChange={(v) => update(h.id, { value: v, valueUpdatedAt: Date.now() })} />
+                </span>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section className="block">
         <h2>Backup</h2>
@@ -1152,28 +1152,6 @@ function HoldingSheet({ start, isNew, labelOf, rate, prices, setP, fundP, setMod
         </div>
 
         <div className="sheet-body">
-          {!isNew && (
-            <div>
-              <div className="two">
-                <button type="button" className={`btn-ink tall${trade === "buy" ? " pressed" : ""}`} aria-expanded={trade === "buy"} onClick={() => openTrade("buy")}><PlusIcon /> I bought more</button>
-                <button type="button" className={`btn-box tall${trade === "sell" ? " pressed" : ""}`} aria-expanded={trade === "sell"} onClick={() => openTrade("sell")}><MinusIcon /> I sold some</button>
-              </div>
-              {trade && (
-                <div className="card trade">
-                  {hasQty && field("t-units", trade === "buy" ? `${unitWord[0].toUpperCase()}${unitWord.slice(1)} bought` : `${unitWord[0].toUpperCase()}${unitWord.slice(1)} sold`,
-                    <NumInput id="t-units" className="f-in" value={tUnits} onChange={setTUnits} />)}
-                  {field("t-amt", trade === "buy" ? (hasQty ? "You paid" : "Amount added") : (hasQty ? "You got" : "Amount taken out"),
-                    <span className="f-money"><span className="muted" aria-hidden="true">{ccy === "THB" ? "฿" : "$"}</span><NumInput id="t-amt" className="f-in" value={tAmt} onChange={setTAmt} /></span>)}
-                  {tErr && <div className="warn small pad">{tErr}</div>}
-                  <div className="pad">
-                    <button type="button" className="btn-ink full" onClick={applyTrade}>{trade === "buy" ? "Add to this holding" : "Take off this holding"}</button>
-                  </div>
-                </div>
-              )}
-              {!trade && <p className="muted small hint">Type the {hasQty ? `${unitWord} and the money` : "amount"}. Folio updates your totals and counts it toward {monthName()}.</p>}
-            </div>
-          )}
-
           <div className="card">
             {field("f-name", "Name", <input id="f-name" className="f-in" value={d.name} placeholder="e.g. SCBRM3" onChange={(e) => up({ name: e.target.value })} />)}
             {field("f-cat", "Category",
@@ -1238,6 +1216,28 @@ function HoldingSheet({ start, isNew, labelOf, rate, prices, setP, fundP, setMod
             {!ask && !note && <p className="muted small hint">{ccy === "THB" ? "Cost is what you paid in total, in baht." : "Cost is what you paid in total, in dollars."}</p>}
           </div>
 
+          {!isNew && (
+            <div>
+              <div className="two">
+                <button type="button" className={`btn-ink tall${trade === "buy" ? " pressed" : ""}`} aria-expanded={trade === "buy"} onClick={() => openTrade("buy")}><PlusIcon /> I bought more</button>
+                <button type="button" className={`btn-box tall${trade === "sell" ? " pressed" : ""}`} aria-expanded={trade === "sell"} onClick={() => openTrade("sell")}><MinusIcon /> I sold some</button>
+              </div>
+              {trade && (
+                <div className="card trade">
+                  {hasQty && field("t-units", trade === "buy" ? `${unitWord[0].toUpperCase()}${unitWord.slice(1)} bought` : `${unitWord[0].toUpperCase()}${unitWord.slice(1)} sold`,
+                    <NumInput id="t-units" className="f-in" value={tUnits} onChange={setTUnits} />)}
+                  {field("t-amt", trade === "buy" ? (hasQty ? "You paid" : "Amount added") : (hasQty ? "You got" : "Amount taken out"),
+                    <span className="f-money"><span className="muted" aria-hidden="true">{ccy === "THB" ? "฿" : "$"}</span><NumInput id="t-amt" className="f-in" value={tAmt} onChange={setTAmt} /></span>)}
+                  {tErr && <div className="warn small pad">{tErr}</div>}
+                  <div className="pad">
+                    <button type="button" className="btn-ink full" onClick={applyTrade}>{trade === "buy" ? "Add to this holding" : "Take off this holding"}</button>
+                  </div>
+                </div>
+              )}
+              {!trade && <p className="muted small hint">Type the {hasQty ? `${unitWord} and the money` : "amount"}. Folio updates your totals and counts it toward {monthName()}.</p>}
+            </div>
+          )}
+
           <div>
             <button type="button" className="btn-box full loss" onClick={() => (isNew ? onClose() : onDelete(d.id))}>{isNew ? "Discard" : "Delete holding"}</button>
             {!isNew && <p className="muted small center hint">You can undo for 6 seconds after deleting.</p>}
@@ -1275,7 +1275,7 @@ const CSS = `
 .folio :focus-visible { outline:2px solid var(--focus); outline-offset:2px; }
 .folio h1, .folio h2, .folio p { margin:0; }
 
-.screen { max-width:560px; margin:0 auto; padding:calc(env(safe-area-inset-top) + 12px) 20px calc(env(safe-area-inset-bottom) + 112px); }
+.screen { max-width:560px; margin:0 auto; padding:calc(env(safe-area-inset-top) + 12px) 20px calc(env(safe-area-inset-bottom) + 96px); }
 .muted { color:var(--ink2); font-size:14px; }
 .small { font-size:13px; }
 .big { font-size:16px; }
@@ -1372,11 +1372,11 @@ const CSS = `
 .pressed { outline:2px solid var(--ink); outline-offset:2px; }
 .danger { padding-top:40px; }
 
-.tabbar { position:fixed; left:0; right:0; bottom:0; z-index:20; background:var(--bar); border-top:1px solid var(--line); display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); padding:8px 12px calc(env(safe-area-inset-bottom) + 8px); }
-.tab { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; min-height:48px; border:0; background:transparent; font-size:12px; font-weight:500; color:#5E6962; }
+.tabbar { position:fixed; left:0; right:0; bottom:0; z-index:20; background:var(--bar); border-top:1px solid var(--line); display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); padding:4px 12px max(6px, calc(env(safe-area-inset-bottom) - 16px)); }
+.tab { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; min-height:44px; border:0; background:transparent; font-size:12px; font-weight:500; color:#5E6962; }
 .tab.on { color:var(--ink); font-weight:600; }
 
-.toast { position:fixed; left:50%; bottom:calc(env(safe-area-inset-bottom) + 84px); transform:translateX(-50%); z-index:40; background:var(--ink); color:var(--bar); border-radius:12px; padding:6px 6px 6px 16px; display:flex; align-items:center; gap:12px; font-size:14px; box-shadow:0 6px 20px rgba(23,32,27,.25); max-width:calc(100% - 32px); }
+.toast { position:fixed; left:50%; bottom:calc(env(safe-area-inset-bottom) + 60px); transform:translateX(-50%); z-index:40; background:var(--ink); color:var(--bar); border-radius:12px; padding:6px 6px 6px 16px; display:flex; align-items:center; gap:12px; font-size:14px; box-shadow:0 6px 20px rgba(23,32,27,.25); max-width:calc(100% - 32px); }
 .toast-btn { min-height:40px; padding:0 14px; border:0; border-radius:9px; background:rgba(255,255,255,.14); color:var(--bar) !important; font-weight:600; }
 
 .scrim { position:fixed; inset:0; z-index:30; background:rgba(23,32,27,.45); }
