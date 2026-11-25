@@ -273,13 +273,28 @@ export default function App() {
   const exportBackup = () => {
     try {
       const payload = JSON.stringify({ app: "folio", version: 7, exportedAt: new Date().toISOString(), rate, holdings }, null, 2);
+      const d = new Date();
+      const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      const filename = `folio-backup-${stamp}.json`;
+
+      // Phones (e.g. iPhone Safari) open a downloaded .json as text instead of saving it.
+      // On touch devices that can share files, open the share sheet so "Save to Files" is one tap.
+      const isTouch = typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
+      if (isTouch && typeof File === "function" && navigator.canShare) {
+        const file = new File([payload], filename, { type: "application/json" });
+        if (navigator.canShare({ files: [file] })) {
+          navigator.share({ files: [file], title: "Folio backup" }).catch((err) => {
+            if (err && err.name !== "AbortError") window.alert("Couldn't share the backup file: " + err.message);
+          });
+          return;
+        }
+      }
+
       const blob = new Blob([payload], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
-      const d = new Date();
-      const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
       a.href = url;
-      a.download = `folio-backup-${stamp}.json`;
+      a.download = filename;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
