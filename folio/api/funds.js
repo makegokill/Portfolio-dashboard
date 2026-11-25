@@ -2,8 +2,11 @@
 // GET /api/funds?codes=SCBRM3,SCBRMNDQ(A) → latest NAV per fund code
 // GET /api/funds?codes=SCBRM3&debug=1     → also returns the raw SEC lookups (no keys), for troubleshooting
 //
-// Needs a free SEC developer key (secopendata.sec.or.th → Subscriptions → Fund Daily Info + fund general info),
-// stored in Vercel as the environment variable SEC_API_KEY. NAVs are published once per trading day,
+// Needs free SEC developer keys (secopendata.sec.or.th → Subscriptions). Each SEC product has its own key,
+// stored in Vercel as environment variables:
+//   SEC_GENERAL_INFO_KEY — "fund general info" product (finds a fund's project ID from its code)
+//   SEC_DAILY_INFO_KEY   — "Fund Daily Info" product (daily NAV)
+// (SEC_API_KEY is still accepted as a fallback for either.) NAVs are published once per trading day,
 // so answers are cached at Vercel's CDN for an hour.
 
 const BASE = "https://api.sec.or.th";
@@ -33,7 +36,7 @@ function splitClass(code) {
   return m ? { base: m[1].trim(), cls: m[2].trim() } : { base: code, cls: null };
 }
 
-async function secGet(path, params, key) {
+async function secGet(path, params, key, keyName) {
   const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== ""));
   for (let attempt = 0; attempt < 3; attempt++) {
     const r = await fetch(`${BASE}${path}?${qs}`, {
@@ -45,8 +48,8 @@ async function secGet(path, params, key) {
       await sleep(wait);
       continue;
     }
-    if (r.status === 401) throw new Error("SEC rejected the API key (401) — check SEC_API_KEY in Vercel");
-    if (r.status === 403) throw new Error(`SEC key isn't subscribed to ${path} (403) — enable that product on secopendata.sec.or.th`);
+    if (r.status === 401) throw new Error(`SEC rejected the key (401) — check ${keyName} in Vercel`);
+    if (r.status === 403) throw new Error(`${keyName} isn't allowed to use ${path} (403) — check it's the key for the right SEC product`);
     if (!r.ok) throw new Error(`SEC returned ${r.status} for ${path}`);
     return r.json();
   }
@@ -62,7 +65,7 @@ async function lookup(code, key, debug) {
   const tries = [...new Set([code, base])];
   let items = [];
   for (const q of tries) {
-    const d = await secGet("/v2/fund/general-info/profiles", { project_info: q, page_size: 100 }, key);
+    const d = await secGet("/v2/fund/general-info/profiles", { project_info: q, page_size: 100 }, key, "SEC_GENERAL_INFO_KEY");
     items = items.concat(d.items || []);
     await sleep(70);
   }
@@ -93,7 +96,7 @@ async function latestNav(info, key, debug, code) {
   const fmt = (d) => d.toISOString().slice(0, 10);
   const params = { proj_id: info.projId, start_nav_date: fmt(start), end_nav_date: fmt(end), page_size: 100 };
   if (info.className) params.fund_class_name = info.className;
-  const d = await secGet("/v2/fund/daily-info/nav", params, key);
+  const d = await secGet("/v2/fund/daily-info/nav", params, key, "SEC_DAILY_INFO_KEY");
   let rows = d.items || [];
   if (info.className) rows = rows.filter((r) => !r.fund_class_name || norm(r.fund_class_name) === norm(info.className));
   if (debug) debug.nav[code] = rows.slice(0, 3);
@@ -112,10 +115,12 @@ export default async function handler(req, res) {
 
   const codes = parseCodes(req.query && req.query.codes);
   const debug = req.query && req.query.debug ? { profiles: {}, nav: {}, errors: {} } : null;
-  const key = process.env.SEC_API_KEY;
+  const generalKey = process.env.SEC_GENERAL_INFO_KEY || process.env.SEC_API_KEY;
+  const dailyKey = process.env.SEC_DAILY_INFO_KEY || process.env.SEC_API_KEY;
 
-  if (!key) {
-    res.status(200).json({ ok: false, error: "Fund prices aren't set up yet: add SEC_API_KEY in Vercel", funds: {}, missing: codes });
+  if (!generalKey || !dailyKey) {
+    const need = [!generalKey && "SEC_GENERAL_INFO_KEY", !dailyKey && "SEC_DAILY_INFO_KEY"].filter(Boolean).join(" and ");
+    res.status(200).json({ ok: false, error: `Fund prices aren't set up yet: add ${need} in Vercel`, funds: {}, missing: codes });
     return;
   }
   if (!codes.length) {
@@ -129,10 +134,10 @@ export default async function handler(req, res) {
   // One at a time — the SEC asks for at least 60 ms between requests
   for (const code of codes) {
     try {
-      const info = await lookup(code, key, debug);
+      const info = await lookup(code, generalKey, debug);
       if (!info) { missing.push(code); continue; }
       await sleep(70);
-      const nav = await latestNav(info, key, debug, code);
+      const nav = await latestNav(info, dailyKey, debug, code);
       if (nav) funds[code] = nav; else missing.push(code);
     } catch (e) {
       missing.push(code);
