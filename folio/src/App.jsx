@@ -46,6 +46,28 @@ const SEED_HOLDINGS = [
   { id: "tr2", name: "Cross margin",    group: "Trading", type: "manual", ccy: "USD", cost: 0, value: 3700,  sold: false },
 ];
 const STORAGE_KEY = "folio-dashboard-v7";
+// Last known live prices, so the app opens with real numbers (not the built-in fallbacks)
+const PRICE_CACHE_KEY = "folio-prices-v1";
+const SEED_SET_PRICES = { CPAXT: 15.20, JCK: 0.13, KEX: null, SCGP: 23.60, TRUE: 13.80, DELTA: 237.50 };
+const STALE_DAYS = 30;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function readPriceCache() {
+  try {
+    const raw = typeof window !== "undefined" && window.localStorage ? window.localStorage.getItem(PRICE_CACHE_KEY) : null;
+    const c = raw ? JSON.parse(raw) : null;
+    return c && typeof c === "object" ? c : {};
+  } catch (e) { return {}; }
+}
+
+function ago(ts) {
+  const days = Math.floor((Date.now() - ts) / DAY_MS);
+  if (days <= 0) return "today";
+  if (days === 1) return "yesterday";
+  if (days < 60) return `${days} days ago`;
+  return `${Math.floor(days / 30)} months ago`;
+}
+const isStaleManual = (h) => h.type === "manual" && (!h.valueUpdatedAt || Date.now() - h.valueUpdatedAt > STALE_DAYS * DAY_MS);
 
 function usdValue(h, prices, rate, setP) {
   if (h.type === "live") return (+h.qty || 0) * (prices[h.coin] ?? FALLBACK_PRICES[h.coin] ?? 0);
@@ -80,15 +102,24 @@ function arcPath(cx, cy, oR, iR, s, e) {
   return `M${f(x1)},${f(y1)} A${oR},${oR} 0 ${la} 1 ${f(x2)},${f(y2)} L${f(x3)},${f(y3)} A${iR},${iR} 0 ${la} 0 ${f(x4)},${f(y4)} Z`;
 }
 
+// Counts up from 0 on first load, then glides from the current number to the new one
 function useCountUp(target, duration = 1400) {
   const [val, setVal] = useState(0);
+  const cur = useRef(0);
+  const first = useRef(true);
   useEffect(() => {
+    const from = cur.current;
+    const dur = first.current ? duration : 650;
+    first.current = false;
+    if (from === target) return;
     let start = null, raf;
     const step = (ts) => {
       if (!start) start = ts;
-      const p = Math.min((ts - start) / duration, 1);
+      const p = Math.min((ts - start) / dur, 1);
       const e = 1 - Math.pow(1 - p, 3);
-      setVal(Math.round(e * target));
+      const v = Math.round(from + (target - from) * e);
+      cur.current = v;
+      setVal(v);
       if (p < 1) raf = requestAnimationFrame(step);
     };
     raf = requestAnimationFrame(step);
@@ -103,12 +134,15 @@ function useMounted() {
 }
 
 export default function App() {
+  const [cache] = useState(readPriceCache);
   const [holdings, setHoldings] = useState(SEED_HOLDINGS);
-  const [rate, setRate] = useState(33);
-  const [prices, setPrices] = useState(FALLBACK_PRICES);
-  const [changes, setChanges] = useState({});
+  const [rate, setRate] = useState(typeof cache.rate === "number" ? cache.rate : 33);
+  // true = you typed the USD/THB rate yourself, so it's kept; false = refreshed automatically
+  const [rateManual, setRateManual] = useState(false);
+  const [prices, setPrices] = useState(() => ({ ...FALLBACK_PRICES, ...(cache.prices || {}) }));
+  const [changes, setChanges] = useState(() => cache.changes || {});
   const [priceMode, setPriceMode] = useState("loading");
-  const [updatedAt, setUpdatedAt] = useState(null);
+  const [updatedAt, setUpdatedAt] = useState(() => (cache.at ? new Date(cache.at) : null));
   const [tab, setTab] = useState("allocation");
   const [hov, setHovRaw] = useState(null);
   const isTouch = useRef(typeof window !== "undefined" && ("ontouchstart" in window || (navigator.maxTouchPoints || 0) > 0));
@@ -117,12 +151,21 @@ export default function App() {
   const [selected, setSelected] = useState(null);
   const [expanded, setExpanded] = useState({});
   const [loaded, setLoaded] = useState(false);
-  const fxLocked = useRef(false);
+  const [undo, setUndo] = useState(null); // { h, idx } for the last deleted holding
+  const undoTimer = useRef(null);
 
   // SET stock prices — keyed by ticker (THB), seeded with last known prices
-  const [setP, setSetP] = useState({ CPAXT: 15.20, JCK: 0.13, KEX: null, SCGP: 23.60, TRUE: 13.80, DELTA: 237.50 });
-  const [stocksUpdatedAt, setStocksUpdatedAt] = useState(null);
+  const [setP, setSetP] = useState(() => ({ ...SEED_SET_PRICES, ...(cache.setP || {}) }));
+  const [stocksUpdatedAt, setStocksUpdatedAt] = useState(() => (cache.setAt ? new Date(cache.setAt) : null));
   const [setMode, setSetMode] = useState("idle");
+  const [setMissing, setSetMissing] = useState([]); // tickers Yahoo had no price for
+
+  // Refs so timers and app-resume handlers always see the latest values
+  const holdingsRef = useRef(holdings); holdingsRef.current = holdings;
+  const rateManualRef = useRef(rateManual); rateManualRef.current = rateManual;
+  const lastCryptoFetch = useRef(0);
+  const lastSetFetch = useRef(0);
+  const lastFxFetch = useRef(0);
 
   const isBangkokTradingHours = () => {
     const bkk = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Bangkok" }));
@@ -131,10 +174,17 @@ export default function App() {
     return day >= 1 && day <= 5 && h >= 9 && h < 18;
   };
 
+  const setTickersOf = (hs) => [...new Set(hs.filter((h) => h.type === "set" && h.ticker).map((h) => String(h.ticker).trim().toUpperCase()).filter(Boolean))].sort();
+
+  // force = fetch even outside SET trading hours (used on load and when tickers change)
   const fetchSetPrices = async (force = false) => {
     if (!force && !isBangkokTradingHours()) return;
+    if (!force && Date.now() - lastSetFetch.current < 60 * 1000) return;
+    const tickers = setTickersOf(holdingsRef.current);
+    if (!tickers.length) return;
+    lastSetFetch.current = Date.now();
     try {
-      const r = await fetch("/api/stocks");
+      const r = await fetch(`/api/stocks?symbols=${encodeURIComponent(tickers.join(","))}`);
       if (!r.ok) throw new Error("api error");
       const d = await r.json();
       if (d.ok && d.prices) {
@@ -143,15 +193,26 @@ export default function App() {
           Object.entries(d.prices).forEach(([sym, v]) => { if (v.price !== null) next[sym] = v.price; });
           return next;
         });
+        setSetMissing(tickers.filter((t) => !d.prices[t] || d.prices[t].price === null));
         setSetMode("live"); setStocksUpdatedAt(new Date());
       } else throw new Error(d.error || "no data");
     } catch (e) { setSetMode("offline"); }
   };
 
+  // Fetch SET prices once your saved holdings are loaded, and again shortly after a ticker is added or changed
+  const setTickerKey = setTickersOf(holdings).join(",");
   useEffect(() => {
-    fetchSetPrices(true); // try on load regardless of hours
-    const t = setInterval(() => fetchSetPrices(), 3 * 60 * 60 * 1000); // every 3h
+    if (!loaded) return;
+    const t = setTimeout(() => fetchSetPrices(true), 1200);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line
+  }, [loaded, setTickerKey]);
+
+  // During SET trading hours, refresh every 5 minutes
+  useEffect(() => {
+    const t = setInterval(() => fetchSetPrices(), 5 * 60 * 1000);
     return () => clearInterval(t);
+    // eslint-disable-next-line
   }, []);
 
   useEffect(() => {
@@ -170,7 +231,8 @@ export default function App() {
         if (raw) {
           const d = JSON.parse(raw);
           if (Array.isArray(d.holdings)) setHoldings(d.holdings);
-          if (typeof d.rate === "number") { setRate(d.rate); fxLocked.current = true; }
+          // Only keep a saved rate if you typed it yourself; otherwise it refreshes from the live feed
+          if (d.rateManual === true && typeof d.rate === "number" && d.rate > 0) { setRate(d.rate); setRateManual(true); }
         }
       } catch (e) { /* keep seed */ }
       finally { setLoaded(true); }
@@ -181,7 +243,7 @@ export default function App() {
     if (!loaded) return;
     (async () => {
       try {
-        const payload = JSON.stringify({ holdings, rate });
+        const payload = JSON.stringify({ holdings, rate, rateManual });
         if (typeof window !== "undefined" && window.localStorage) {
           window.localStorage.setItem(STORAGE_KEY, payload);
         }
@@ -190,9 +252,35 @@ export default function App() {
         }
       } catch (e) { /* session only */ }
     })();
-  }, [holdings, rate, loaded]);
+  }, [holdings, rate, rateManual, loaded]);
+
+  // Remember the latest prices so the next visit opens with them
+  useEffect(() => {
+    try {
+      if (typeof window === "undefined" || !window.localStorage) return;
+      window.localStorage.setItem(PRICE_CACHE_KEY, JSON.stringify({
+        prices, changes, setP, rate: rateManual ? undefined : rate,
+        at: updatedAt ? updatedAt.getTime() : null,
+        setAt: stocksUpdatedAt ? stocksUpdatedAt.getTime() : null,
+      }));
+    } catch (e) { /* ignore */ }
+  }, [prices, changes, setP, rate, rateManual, updatedAt, stocksUpdatedAt]);
+
+  const fetchFx = async (force = false) => {
+    if (rateManualRef.current) return;
+    if (!force && Date.now() - lastFxFetch.current < 60 * 60 * 1000) return; // at most hourly
+    lastFxFetch.current = Date.now();
+    try {
+      const fr = await fetch("https://open.er-api.com/v6/latest/USD");
+      if (fr.ok) {
+        const fd = await fr.json();
+        if (fd?.rates?.THB && !rateManualRef.current) setRate(+fd.rates.THB.toFixed(2));
+      }
+    } catch (e) { /* keep last rate */ }
+  };
 
   const fetchPrices = async () => {
+    lastCryptoFetch.current = Date.now();
     setPriceMode((m) => (m === "live" ? "live" : "loading"));
     try {
       const ids = Object.keys(COINS).join(",");
@@ -208,14 +296,25 @@ export default function App() {
       });
       setPrices(np); setChanges(nc); setPriceMode("live"); setUpdatedAt(new Date());
     } catch (e) { setPriceMode("offline"); }
-    if (!fxLocked.current) {
-      try {
-        const fr = await fetch("https://open.er-api.com/v6/latest/USD");
-        if (fr.ok) { const fd = await fr.json(); if (fd?.rates?.THB) { setRate(+fd.rates.THB.toFixed(2)); fxLocked.current = true; } }
-      } catch (e) { /* keep */ }
-    }
+    fetchFx();
   };
   useEffect(() => { fetchPrices(); const t = setInterval(fetchPrices, 90000); return () => clearInterval(t); /* eslint-disable-next-line */ }, []);
+
+  // iPhone pauses the page in the background — refresh as soon as you come back to it
+  useEffect(() => {
+    const onResume = () => {
+      if (document.visibilityState !== "visible") return;
+      if (Date.now() - lastCryptoFetch.current > 20 * 1000) fetchPrices();
+      fetchSetPrices();
+    };
+    document.addEventListener("visibilitychange", onResume);
+    window.addEventListener("pageshow", onResume);
+    return () => { document.removeEventListener("visibilitychange", onResume); window.removeEventListener("pageshow", onResume); };
+    // eslint-disable-next-line
+  }, []);
+
+  // Fetch a fresh USD/THB rate once storage has loaded, and again when you switch the rate back to automatic
+  useEffect(() => { if (loaded && !rateManual) fetchFx(true); /* eslint-disable-next-line */ }, [loaded, rateManual]);
 
   const fthb = (v) => "฿" + Math.round(Math.abs(v) * rate).toLocaleString("en-US");
 
@@ -260,19 +359,32 @@ export default function App() {
   const count = useCountUp(GRAND.value, 1400);
 
   const update = (id, patch) => setHoldings((hs) => hs.map((h) => (h.id === id ? { ...h, ...patch } : h)));
-  const remove = (id) => setHoldings((hs) => hs.filter((h) => h.id !== id));
+  const remove = (id) => {
+    const idx = holdings.findIndex((h) => h.id === id);
+    if (idx < 0) return;
+    setUndo({ h: holdings[idx], idx });
+    setHoldings((hs) => hs.filter((h) => h.id !== id));
+    clearTimeout(undoTimer.current);
+    undoTimer.current = setTimeout(() => setUndo(null), 6000);
+  };
+  const undoDelete = () => {
+    if (!undo) return;
+    setHoldings((hs) => { const next = [...hs]; next.splice(Math.min(undo.idx, next.length), 0, undo.h); return next; });
+    setExpanded((e) => ({ ...e, [undo.h.group]: true }));
+    clearTimeout(undoTimer.current);
+    setUndo(null);
+  };
+  useEffect(() => () => clearTimeout(undoTimer.current), []);
   const addHolding = (group = "Crypto") => {
-    setHoldings((hs) => [...hs, { id: uid(), name: "New asset", group, type: "manual", ccy: "USD", cost: 0, value: 0, sold: false }]);
+    setHoldings((hs) => [...hs, { id: uid(), name: "New asset", group, type: "manual", ccy: "USD", cost: 0, value: 0, valueUpdatedAt: Date.now() }]);
     setExpanded((e) => ({ ...e, [group]: true })); // open that group so the new row is visible
   };
-  const num = (v) => { const n = parseFloat(v); return isNaN(n) ? 0 : n; };
-  const selectAll = (e) => e.target.select();
   const resetData = () => { if (typeof window !== "undefined" && window.confirm("Reset all holdings to the latest data set? This replaces what's saved on this device.")) setHoldings(SEED_HOLDINGS); };
 
   // ── Backup: export holdings to a .json file / import one back ──
   const exportBackup = () => {
     try {
-      const payload = JSON.stringify({ app: "folio", version: 7, exportedAt: new Date().toISOString(), rate, holdings }, null, 2);
+      const payload = JSON.stringify({ app: "folio", version: 7, exportedAt: new Date().toISOString(), rate, rateManual, holdings }, null, 2);
       const d = new Date();
       const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
       const filename = `folio-backup-${stamp}.json`;
@@ -316,7 +428,8 @@ export default function App() {
         const when = d.exportedAt ? new Date(d.exportedAt).toLocaleString() : "unknown date";
         if (!window.confirm(`Restore backup from ${when} (${d.holdings.length} holdings)? This replaces what's saved on this device.`)) return;
         setHoldings(d.holdings);
-        if (typeof d.rate === "number" && d.rate > 0) { setRate(d.rate); fxLocked.current = true; }
+        if (d.rateManual === true && typeof d.rate === "number" && d.rate > 0) { setRate(d.rate); setRateManual(true); }
+        else setRateManual(false);
         window.alert("Backup restored.");
       } catch (err) {
         window.alert("Import failed: " + err.message);
@@ -326,9 +439,9 @@ export default function App() {
   };
 
   const TABS = [
-    { k: "allocation", label: "Allocation",   Icon: PieIcon },
-    { k: "pnl",        label: "Profit & Loss", Icon: TableIcon },
-    { k: "edit",       label: "Edit Holdings", Icon: GearIcon },
+    { k: "allocation", label: "Allocation",    short: "Allocation", Icon: PieIcon },
+    { k: "pnl",        label: "Profit & Loss", short: "P&L",        Icon: TableIcon },
+    { k: "edit",       label: "Edit Holdings", short: "Edit",       Icon: GearIcon },
   ];
 
   return (
@@ -351,7 +464,10 @@ export default function App() {
             <div className="nav-sep" />
             <div className="fx-wrap">
               <span className="fx-label">USD/THB</span>
-              <input className="fx-input" type="number" value={rate} onFocus={selectAll} onChange={(e) => { fxLocked.current = true; setRate(num(e.target.value)); }} />
+              <NumInput className="fx-input" value={rate} onChange={(v) => { if (v > 0) { setRateManual(true); setRate(v); } }} />
+              {rateManual && (
+                <button className="fx-auto" onClick={() => setRateManual(false)} title="You set this rate by hand. Tap to use the live rate again.">Auto</button>
+              )}
             </div>
           </div>
         </div>
@@ -399,7 +515,7 @@ export default function App() {
 
         <div className="tabs-row">
           {TABS.map((tb) => (
-            <button key={tb.k} className={`tab-btn${tab === tb.k ? " active" : ""}`} onClick={() => setTab(tb.k)}><tb.Icon /> {tb.label}</button>
+            <button key={tb.k} className={`tab-btn${tab === tb.k ? " active" : ""}`} onClick={() => setTab(tb.k)}><tb.Icon /> <span className="tab-long">{tb.label}</span><span className="tab-short">{tb.short}</span></button>
           ))}
         </div>
 
@@ -418,13 +534,42 @@ export default function App() {
           {tab === "edit" && (
             <EditHoldings holdings={holdings} expanded={expanded} setExpanded={setExpanded}
               update={update} remove={remove} addHolding={addHolding} resetData={resetData}
-              exportBackup={exportBackup} importBackup={importBackup} num={num} selectAll={selectAll} prices={prices} rate={rate} fthb={fthb} setP={setP} />
+              exportBackup={exportBackup} importBackup={importBackup} prices={prices} rate={rate} fthb={fthb} setP={setP}
+              setMode={setMode} setMissing={setMissing} />
           )}
         </div>
 
         <div className="footer">USD · ฿THB at {rate} · crypto &amp; gold live via CoinGecko · SET stocks via Yahoo Finance ({setMode === "live" ? `updated ${stocksUpdatedAt?.toLocaleTimeString()}` : setMode === "offline" ? "offline · using last known prices" : "loading"}) · ETF at last NAV · {updatedAt ? `crypto updated ${updatedAt.toLocaleTimeString()}` : "loading"}</div>
       </div>
+
+      {undo && (
+        <div className="toast" role="status">
+          <span>Deleted <b>{undo.h.name}</b></span>
+          <button className="toast-btn" onClick={undoDelete}>Undo</button>
+        </div>
+      )}
     </div>
+  );
+}
+
+// Number field for phones: decimal keypad, thousands separators when not editing,
+// and it keeps what you type (e.g. "0." or an empty field) instead of fighting you.
+function NumInput({ value, onChange, className, style }) {
+  const [draft, setDraft] = useState(null);
+  const parseDraft = (s) => { const n = parseFloat(String(s).replace(/,/g, "")); return isNaN(n) ? 0 : n; };
+  // If the value is changed from elsewhere (e.g. tapping "Auto" for the rate), show the new value
+  useEffect(() => { if (draft !== null && parseDraft(draft) !== (Number(value) || 0)) setDraft(null); /* eslint-disable-next-line */ }, [value]);
+  const shown = draft !== null ? draft : (Number(value) || 0).toLocaleString("en-US", { maximumFractionDigits: 8 });
+  return (
+    <input className={className} style={style} type="text" inputMode="decimal" autoComplete="off" autoCorrect="off" spellCheck={false}
+      value={shown}
+      onFocus={(e) => { const el = e.target; setDraft(value ? String(value) : ""); setTimeout(() => { try { el.select(); } catch (err) { /* ignore */ } }, 0); }}
+      onChange={(e) => {
+        const raw = e.target.value.replace(/[^0-9.,-]/g, "");
+        setDraft(raw);
+        onChange(parseDraft(raw));
+      }}
+      onBlur={() => setDraft(null)} />
   );
 }
 
@@ -664,15 +809,19 @@ function PnLTable({ groups, grand, hov, onHov }) {
   );
 }
 
-function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHolding, resetData, exportBackup, importBackup, num, selectAll, prices, rate, fthb, setP }) {
+function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHolding, resetData, exportBackup, importBackup, prices, rate, fthb, setP, setMode, setMissing }) {
   const [showAdd, setShowAdd] = React.useState(false);
   const fileRef = React.useRef(null);
+  const staleCount = holdings.filter(isStaleManual).length;
   return (
     <div className="card" style={{ padding: 22 }}>
       <div className="edit-hdr">
         <div>
           <div className="edit-title">Holdings</div>
           <div className="edit-sub">Click a category to expand and edit</div>
+          {staleCount > 0 && (
+            <div className="edit-stale">{staleCount} manual {staleCount === 1 ? "value" : "values"} may be out of date (not updated in the last {STALE_DAYS} days)</div>
+          )}
         </div>
         <div style={{ display: "flex", gap: 8, position: "relative", flexWrap: "wrap" }}>
           <input ref={fileRef} type="file" accept="application/json,.json" style={{ display: "none" }}
@@ -708,6 +857,7 @@ function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHold
               <svg className={`chev${isOpen ? " open" : ""}`} width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="9 18 15 12 9 6" /></svg>
               <span style={{ fontWeight: 600, fontSize: 14, fontFamily: "'Sora',sans-serif" }}>{GROUPS_META[g].label}</span>
               <span style={{ fontSize: 11, color: "var(--fg4)", fontWeight: 400 }}>· {items.length} {items.length > 1 ? "assets" : "asset"}</span>
+              {items.some(isStaleManual) && <span className="stale-dot" title="Has values not updated recently" />}
               <span style={{ marginLeft: "auto", fontFamily: "'JetBrains Mono',monospace", fontSize: 12, color: "var(--fg2)" }}>{fu(gv)}</span>
             </div>
 
@@ -731,16 +881,19 @@ function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHold
                         <select className="ein" value={h.type} onChange={(e) => {
                           const type = e.target.value;
                           if (type === "live") update(h.id, { type, coin: h.coin || "bitcoin", qty: h.qty || 0, costUSD: h.costUSD || 0 });
-                          else update(h.id, { type, ccy: h.ccy || "USD", cost: h.cost || 0, value: h.value || 0 });
+                          else if (type === "set") update(h.id, { type, ticker: h.ticker || "", qty: h.qty || 0, costTHB: h.costTHB || 0 });
+                          else update(h.id, { type, ccy: h.ccy || "USD", cost: h.cost || 0, value: h.value || 0, valueUpdatedAt: Date.now() });
                         }}>
                           <option value="live">Live (Crypto)</option>
                           <option value="set">Live (SET Stock)</option>
                           <option value="manual">Manual</option>
                         </select>
                       </div>
-                      <label className="esold"><input type="checkbox" checked={!!h.sold} onChange={(e) => update(h.id, { sold: e.target.checked })} /> Sold</label>
-                      <button className="edel" onClick={() => remove(h.id)} title="Delete"><TrashIcon /></button>
+                      <button className="edel" onClick={() => remove(h.id)} title="Delete" aria-label={`Delete ${h.name}`}><TrashIcon /></button>
                     </div>
+                    {h.sold && (
+                      <div className="enote">Marked as sold in an older version, so it isn't counted. Delete it if you no longer hold it.</div>
+                    )}
 
 
                     {h.type === "live" && (
@@ -753,11 +906,11 @@ function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHold
                         </div>
                         <div style={{ flex: "1 1 100px" }}>
                           <span className="elbl">Quantity held</span>
-                          <input className="ein" type="number" step="any" value={h.qty} onFocus={selectAll} onChange={(e) => update(h.id, { qty: num(e.target.value) })} />
+                          <NumInput className="ein" value={h.qty} onChange={(v) => update(h.id, { qty: v })} />
                         </div>
                         <div style={{ flex: "1 1 100px" }}>
                           <span className="elbl">Cost basis (USD)</span>
-                          <input className="ein" type="number" step="any" value={h.costUSD} onFocus={selectAll} onChange={(e) => update(h.id, { costUSD: num(e.target.value) })} />
+                          <NumInput className="ein" value={h.costUSD} onChange={(v) => update(h.id, { costUSD: v })} />
                         </div>
                       </div>
                     )}
@@ -769,11 +922,11 @@ function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHold
                         </div>
                         <div style={{ flex: "1 1 100px" }}>
                           <span className="elbl">Shares held</span>
-                          <input className="ein" type="number" step="any" value={h.qty} onFocus={selectAll} onChange={(e) => update(h.id, { qty: num(e.target.value) })} />
+                          <NumInput className="ein" value={h.qty} onChange={(v) => update(h.id, { qty: v })} />
                         </div>
                         <div style={{ flex: "1 1 100px" }}>
                           <span className="elbl">Cost (THB)</span>
-                          <input className="ein" type="number" step="any" value={h.costTHB || 0} onFocus={selectAll} onChange={(e) => update(h.id, { costTHB: num(e.target.value) })} />
+                          <NumInput className="ein" value={h.costTHB || 0} onChange={(v) => update(h.id, { costTHB: v })} />
                         </div>
                       </div>
                     )}
@@ -787,11 +940,11 @@ function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHold
                         </div>
                         <div style={{ flex: "1 1 100px" }}>
                           <span className="elbl">Cost ({h.ccy})</span>
-                          <input className="ein" type="number" step="any" value={h.cost} onFocus={selectAll} onChange={(e) => update(h.id, { cost: num(e.target.value) })} />
+                          <NumInput className="ein" value={h.cost} onChange={(v) => update(h.id, { cost: v })} />
                         </div>
                         <div style={{ flex: "1 1 100px" }}>
                           <span className="elbl">Current value ({h.ccy})</span>
-                          <input className="ein" type="number" step="any" value={h.value} onFocus={selectAll} onChange={(e) => update(h.id, { value: num(e.target.value) })} />
+                          <NumInput className="ein" value={h.value} onChange={(v) => update(h.id, { value: v, valueUpdatedAt: Date.now() })} />
                         </div>
                       </div>
                     )}
@@ -800,6 +953,14 @@ function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHold
                       → {fu(usdValue(h, prices, rate, setP))} <span style={{ color: "var(--fg4)" }}>({fthb(usdValue(h, prices, rate, setP))})</span>
                       {h.type === "live" && <span style={{ color: "var(--accent)", marginLeft: 8 }}>@ {fu(prices[h.coin] ?? FALLBACK_PRICES[h.coin])}/unit</span>}
                       {h.type === "set" && setP[h.ticker] && <span style={{ color: "#1FB6C9", marginLeft: 8 }}>@ ฿{setP[h.ticker]}/share · SET</span>}
+                      {h.type === "set" && !setP[h.ticker] && h.ticker && setMode === "live" && setMissing.includes(h.ticker) && (
+                        <span style={{ color: "var(--neg)", marginLeft: 8 }}>No SET price found for "{h.ticker}" — check the ticker</span>
+                      )}
+                      {h.type === "manual" && (
+                        <span className={isStaleManual(h) ? "eage stale" : "eage"}>
+                          · value {h.valueUpdatedAt ? `updated ${ago(h.valueUpdatedAt)}` : "date unknown — update it to start tracking"}
+                        </span>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -844,7 +1005,7 @@ const CSS = `
   radial-gradient(ellipse 700px 500px at 50% 110%, rgba(31,182,201,.04) 0%, transparent 55%),
   radial-gradient(ellipse 500px 400px at 96% 72%, rgba(229,72,77,.04) 0%, transparent 52%); }
 
-.nav { position:sticky; top:0; z-index:100; backdrop-filter:blur(24px) saturate(150%); -webkit-backdrop-filter:blur(24px); background:rgba(6,8,15,.82); border-bottom:1px solid var(--border); }
+.nav { position:sticky; top:0; z-index:100; padding-top:env(safe-area-inset-top); backdrop-filter:blur(24px) saturate(150%); -webkit-backdrop-filter:blur(24px); background:rgba(6,8,15,.82); border-bottom:1px solid var(--border); }
 .nav::after { content:''; position:absolute; bottom:-1px; left:50%; transform:translateX(-50%); width:70%; height:1px; background:linear-gradient(90deg,transparent,rgba(247,147,26,.28),rgba(124,92,255,.18),transparent); pointer-events:none; }
 .nav-inner { max-width:1240px; margin:0 auto; padding:0 44px; height:60px; display:flex; align-items:center; justify-content:space-between; }
 .nav-logo { display:flex; align-items:center; gap:11px; }
@@ -859,6 +1020,7 @@ const CSS = `
 .fx-label { font-size:11px; color:var(--fg3); }
 .fx-input { background:var(--bg-inset); border:1px solid var(--border); color:var(--fg1); border-radius:7px; padding:5px 9px; width:70px; outline:none; font-family:'JetBrains Mono',monospace; font-size:12px; transition:border-color var(--t); }
 .fx-input:focus { border-color:var(--border-foc); }
+.fx-auto { background:none; border:1px solid rgba(247,147,26,.35); color:var(--accent); border-radius:6px; padding:3px 7px; font-size:10.5px; font-weight:600; font-family:'Sora',sans-serif; cursor:pointer; }
 
 .ticker { border-bottom:1px solid var(--border); background:rgba(255,255,255,.012); position:relative; z-index:1; }
 .ticker-inner { max-width:1240px; margin:0 auto; padding:0 44px; height:38px; display:flex; align-items:center; gap:28px; overflow-x:auto; scrollbar-width:none; }
@@ -903,6 +1065,7 @@ const CSS = `
 .tab-btn { background:none; border:none; cursor:pointer; font-family:'Sora',sans-serif; font-size:13px; font-weight:500; color:var(--fg3); padding:11px 22px 13px; border-bottom:2px solid transparent; margin-bottom:-1px; display:flex; align-items:center; gap:7px; transition:color var(--t),border-color var(--t); white-space:nowrap; }
 .tab-btn:hover { color:var(--fg2); }
 .tab-btn.active { color:var(--fg1); border-bottom-color:var(--accent); }
+.tab-short { display:none; }
 
 .card { background:var(--bg-card); border:1px solid var(--border); border-top-color:var(--border-hi); border-radius:13px; backdrop-filter:blur(18px) saturate(140%); -webkit-backdrop-filter:blur(18px) saturate(140%); box-shadow:0 1px 40px rgba(0,0,0,.3),inset 0 1px 0 rgba(255,255,255,.06); }
 .alloc-grid { display:grid; grid-template-columns:340px 1fr; gap:14px; align-items:start; }
@@ -972,9 +1135,15 @@ td.muted{color:var(--fg3)} td.dim{color:var(--fg4)} td.pos{color:var(--pos)} td.
 .elbl { font-size:10px; letter-spacing:.06em; text-transform:uppercase; color:var(--fg3); margin-bottom:5px; display:block; }
 .ein { background:rgba(0,0,0,.32); border:1px solid var(--border); color:var(--fg1); border-radius:8px; padding:8px 10px; outline:none; width:100%; font-family:'JetBrains Mono',monospace; font-size:13px; transition:border-color var(--t); }
 .ein:focus { border-color:var(--border-foc); }
-.esold { display:flex; align-items:center; gap:5px; font-size:12px; color:var(--fg2); padding-bottom:8px; white-space:nowrap; font-family:'Sora',sans-serif; }
-.esold input { width:15px; height:15px; accent-color:var(--accent); }
-.edel { background:none; border:none; color:var(--fg3); cursor:pointer; padding:0 0 8px; transition:color var(--t); }
+.edel { background:none; border:none; color:var(--fg3); cursor:pointer; padding:8px 6px; margin-bottom:0; transition:color var(--t); }
+.edit-stale { font-size:11.5px; color:#E8B923; margin-top:6px; }
+.stale-dot { width:6px; height:6px; border-radius:50%; background:#E8B923; flex-shrink:0; }
+.eage { color:var(--fg3); margin-left:8px; }
+.eage.stale { color:#E8B923; }
+.toast { position:fixed; left:50%; bottom:calc(20px + env(safe-area-inset-bottom)); transform:translateX(-50%); z-index:200; display:flex; align-items:center; gap:16px; max-width:calc(100% - 32px); background:#141821; border:1px solid var(--border-hi); border-radius:12px; padding:10px 10px 10px 16px; font-size:13px; color:var(--fg1); box-shadow:0 12px 40px rgba(0,0,0,.55); animation:toastin .2s ease both; }
+.toast span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.toast-btn { background:var(--accent); color:#000; border:none; border-radius:8px; padding:7px 14px; font-weight:700; font-size:13px; font-family:'Sora',sans-serif; cursor:pointer; flex-shrink:0; }
+@keyframes toastin { from{opacity:0;transform:translate(-50%,8px)} to{opacity:1;transform:translate(-50%,0)} }
 .edel:hover { color:var(--neg); }
 .enote { font-size:10.5px; color:var(--fg4); margin-top:7px; line-height:1.5; }
 .eval { font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--fg3); margin-top:7px; }
@@ -996,6 +1165,8 @@ td.muted{color:var(--fg3)} td.dim{color:var(--fg4)} td.pos{color:var(--pos)} td.
   .stat-val{font-size:16px} .stat-lbl{font-size:10px}
 }
 @media(max-width:640px){
+  .tab-long{display:none} .tab-short{display:inline}
+  .tab-btn{flex:1;justify-content:center;padding:11px 6px 13px}
   .pnl-table td,.pnl-table th{padding:10px 8px;font-size:13px}
   .pnl-table th{font-size:9px;letter-spacing:.03em}
   .g-row td{padding:11px 6px} .item-row td{padding-left:10px}
