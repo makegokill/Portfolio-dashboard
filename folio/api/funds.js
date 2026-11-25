@@ -61,30 +61,41 @@ async function lookup(code, key, debug) {
   const hit = lookupCache.get(code);
   if (hit && Date.now() - hit.at < LOOKUP_TTL_MS) return hit.value;
 
-  const { base, cls } = splitClass(code);
-  const tries = [...new Set([code, base])];
+  // How the SEC lists funds (seen in real responses):
+  //   plain fund        → proj_abbr_name "SCBRM3",      fund_class_name "main"
+  //   fund with classes → proj_abbr_name "SCBAUTO",     fund_class_name "SCBAUTO(SSF)", "SCBAUTO(A)", …
+  //                       proj_abbr_name "SCBLTTFUND",  fund_class_name "SCBLTT-SSF", …
+  // So search by the code, the part before "(", and the part before "-", then match the class name first.
+  const { base } = splitClass(code);
+  const dashBase = base.split("-")[0];
+  const tries = [...new Set([code, base, dashBase].filter(Boolean))];
   let items = [];
   for (const q of tries) {
     const d = await secGet("/v2/fund/general-info/profiles", { project_info: q, page_size: 100 }, key, "SEC_GENERAL_INFO_KEY");
     items = items.concat(d.items || []);
     await sleep(70);
+    if (items.some((p) => norm(p.fund_class_name) === code)) break; // exact class found, no need to search more
   }
   if (debug) debug.profiles[code] = items.slice(0, 15).map((p) => ({
     proj_id: p.proj_id, proj_abbr_name: p.proj_abbr_name, fund_class_name: p.fund_class_name, fund_status: p.fund_status,
   }));
 
-  const active = (p) => !p.fund_status || norm(p.fund_status) === "RG";
+  const inactive = (p) => /cancel|expire|liquidat|terminat|dissol|revok/i.test(String(p.fund_status || ""));
+  const live = items.filter((p) => !inactive(p));
+  const sameProj = (p) => norm(p.proj_abbr_name) === code;
   const pick =
-    // the class itself is listed under the full code, e.g. proj_abbr_name or fund_class_name = "SCBAUTO(SSF)"
-    items.find((p) => active(p) && (norm(p.proj_abbr_name) === code || norm(p.fund_class_name) === code)) ||
-    // the project is listed under the base code, with the class named separately
-    items.find((p) => active(p) && norm(p.proj_abbr_name) === base && (!cls || norm(p.fund_class_name) === cls || norm(p.fund_class_name).endsWith(`(${cls})`))) ||
-    // plain fund code without classes
-    (!cls && items.find((p) => active(p) && norm(p.proj_abbr_name) === base)) ||
+    // exact share class, e.g. "SCBAUTO(SSF)", "SCBLTT-SSF", "SCBRMNDQ(A)"
+    live.find((p) => norm(p.fund_class_name) === code) ||
+    // plain fund with a single "main" class, e.g. SCBRM3
+    live.find((p) => sameProj(p) && norm(p.fund_class_name) === "MAIN") ||
+    // project code given without a class, e.g. "SCBRMNDQ" → its (A) accumulation class, else the first class
+    live.find((p) => sameProj(p) && norm(p.fund_class_name) === `${code}(A)`) ||
+    live.find(sameProj) ||
     null;
 
+  const isMain = pick && (!pick.fund_class_name || norm(pick.fund_class_name) === "MAIN");
   const value = pick
-    ? { projId: pick.proj_id, className: pick.fund_class_name || null, resolved: pick.fund_class_name && cls ? `${pick.proj_abbr_name} ${pick.fund_class_name}` : pick.proj_abbr_name }
+    ? { projId: pick.proj_id, className: isMain ? null : pick.fund_class_name, resolved: isMain ? pick.proj_abbr_name : pick.fund_class_name }
     : null;
   lookupCache.set(code, { at: Date.now(), value });
   return value;
@@ -98,8 +109,8 @@ async function latestNav(info, key, debug, code) {
   if (info.className) params.fund_class_name = info.className;
   const d = await secGet("/v2/fund/daily-info/nav", params, key, "SEC_DAILY_INFO_KEY");
   let rows = d.items || [];
+  if (debug) debug.nav[code] = { params, sample: rows.slice(0, 3) };
   if (info.className) rows = rows.filter((r) => !r.fund_class_name || norm(r.fund_class_name) === norm(info.className));
-  if (debug) debug.nav[code] = rows.slice(0, 3);
   const priced = rows
     .map((r) => ({ r, nav: Number(r.last_val) }))
     .filter((x) => x.nav > 0)
