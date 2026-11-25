@@ -69,19 +69,31 @@ function ago(ts) {
 }
 const isStaleManual = (h) => h.type === "manual" && (!h.valueUpdatedAt || Date.now() - h.valueUpdatedAt > STALE_DAYS * DAY_MS);
 
-function usdValue(h, prices, rate, setP) {
+const fundKeyOf = (h) => String(h.fundCode || "").trim().toUpperCase();
+
+// Price of one fund unit in USD (fund NAVs are in THB, converted at the current USD/THB rate)
+function fundUnitUSD(f, rate) {
+  if (!f || typeof f.nav !== "number") return null;
+  return f.currency === "USD" ? f.nav : f.nav / (rate || 1);
+}
+
+function usdValue(h, prices, rate, setP, fundP) {
   if (h.type === "live") return (+h.qty || 0) * (prices[h.coin] ?? FALLBACK_PRICES[h.coin] ?? 0);
   if (h.type === "set") {
     const p = setP?.[h.ticker];
     if (p) return (+h.qty || 0) * p / (rate || 1);
     return (+h.fallbackTHB || 0) / (rate || 1); // use fallback if no price
   }
+  if (h.type === "fund") {
+    const unit = fundUnitUSD(fundP?.[fundKeyOf(h)], rate);
+    return unit != null ? (+h.qty || 0) * unit : 0;
+  }
   if (h.ccy === "USD") return +h.value || 0;
   return (+h.value || 0) / (rate || 1);
 }
 function usdCost(h, rate) {
   if (h.type === "live") return +h.costUSD || 0;
-  if (h.type === "set") return (+h.costTHB || 0) / (rate || 1);
+  if (h.type === "set" || h.type === "fund") return (+h.costTHB || 0) / (rate || 1);
   if (h.ccy === "USD") return +h.cost || 0;
   return (+h.cost || 0) / (rate || 1);
 }
@@ -159,6 +171,13 @@ export default function App() {
   const [stocksUpdatedAt, setStocksUpdatedAt] = useState(() => (cache.setAt ? new Date(cache.setAt) : null));
   const [setMode, setSetMode] = useState("idle");
   const [setMissing, setSetMissing] = useState([]); // tickers Yahoo had no price for
+
+  // Fund NAVs (THB, published once per trading day) — keyed by fund code
+  const [fundP, setFundP] = useState(() => cache.fundP || {});
+  const [fundsUpdatedAt, setFundsUpdatedAt] = useState(() => (cache.fundAt ? new Date(cache.fundAt) : null));
+  const [fundMode, setFundMode] = useState("idle");
+  const [fundMissing, setFundMissing] = useState([]);
+  const lastFundFetch = useRef(cache.fundAt || 0);
 
   // Refs so timers and app-resume handlers always see the latest values
   const holdingsRef = useRef(holdings); holdingsRef.current = holdings;
@@ -259,12 +278,63 @@ export default function App() {
     try {
       if (typeof window === "undefined" || !window.localStorage) return;
       window.localStorage.setItem(PRICE_CACHE_KEY, JSON.stringify({
-        prices, changes, setP, rate: rateManual ? undefined : rate,
+        prices, changes, setP, fundP, rate: rateManual ? undefined : rate,
         at: updatedAt ? updatedAt.getTime() : null,
         setAt: stocksUpdatedAt ? stocksUpdatedAt.getTime() : null,
+        fundAt: fundsUpdatedAt ? fundsUpdatedAt.getTime() : null,
       }));
     } catch (e) { /* ignore */ }
-  }, [prices, changes, setP, rate, rateManual, updatedAt, stocksUpdatedAt]);
+  }, [prices, changes, setP, fundP, rate, rateManual, updatedAt, stocksUpdatedAt, fundsUpdatedAt]);
+
+  // ── Fund NAVs: one price per trading day, so check at most every 3 hours ──
+  const fundCodesOf = (hs) => [...new Set(hs.filter((h) => h.type === "fund").map(fundKeyOf).filter(Boolean))].sort();
+  const fetchFundPrices = async (force = false) => {
+    if (!force && Date.now() - lastFundFetch.current < 3 * 60 * 60 * 1000) return;
+    const codes = fundCodesOf(holdingsRef.current);
+    if (!codes.length) return;
+    lastFundFetch.current = Date.now();
+    try {
+      const r = await fetch(`/api/funds?codes=${encodeURIComponent(codes.join(","))}`);
+      if (!r.ok) throw new Error("api error");
+      const d = await r.json();
+      if (d.ok && d.funds) {
+        setFundP((prev) => ({ ...prev, ...d.funds }));
+        setFundMissing(codes.filter((c) => !d.funds[c]));
+        setFundMode("live"); setFundsUpdatedAt(new Date());
+      } else throw new Error(d.error || "no data");
+    } catch (e) { setFundMode("offline"); }
+  };
+  const fundKey = fundCodesOf(holdings).join(",");
+  const fundKeyRef = useRef(null);
+  useEffect(() => {
+    if (!loaded) return;
+    // First load: use the saved NAVs if they're recent; a new or changed fund code fetches right away
+    const changed = fundKeyRef.current !== null && fundKeyRef.current !== fundKey;
+    const missingNav = fundKey.split(",").some((c) => c && !fundP[c]);
+    fundKeyRef.current = fundKey;
+    const t = setTimeout(() => fetchFundPrices(changed || missingNav), 1200);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line
+  }, [loaded, fundKey]);
+  useEffect(() => {
+    const t = setInterval(() => fetchFundPrices(), 30 * 60 * 1000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line
+  }, []);
+
+  // When a holding is switched to a fund, estimate its units from its last value once the NAV arrives
+  useEffect(() => {
+    const pending = holdings.filter((h) => h.type === "fund" && h.estimateFromTHB > 0 && !(+h.qty > 0) && fundP[fundKeyOf(h)]);
+    if (!pending.length) return;
+    setHoldings((hs) => hs.map((h) => {
+      const f = h.type === "fund" && h.estimateFromTHB > 0 && !(+h.qty > 0) ? fundP[fundKeyOf(h)] : null;
+      if (!f || !(f.nav > 0)) return h;
+      const unitTHB = f.currency === "USD" ? f.nav * (rate || 1) : f.nav;
+      const { estimateFromTHB, ...rest } = h;
+      return { ...rest, qty: +(estimateFromTHB / unitTHB).toFixed(4), unitsEstimated: true };
+    }));
+    // eslint-disable-next-line
+  }, [fundP, holdings]);
 
   const fetchFx = async (force = false) => {
     if (rateManualRef.current) return;
@@ -306,6 +376,7 @@ export default function App() {
       if (document.visibilityState !== "visible") return;
       if (Date.now() - lastCryptoFetch.current > 20 * 1000) fetchPrices();
       fetchSetPrices();
+      fetchFundPrices();
     };
     document.addEventListener("visibilitychange", onResume);
     window.addEventListener("pageshow", onResume);
@@ -320,7 +391,7 @@ export default function App() {
 
   const groups = useMemo(() => ORDER.map((g) => {
     const items = holdings.filter((h) => h.group === g);
-    const val = items.filter((h) => !h.sold).reduce((s, h) => s + usdValue(h, prices, rate, setP), 0);
+    const val = items.filter((h) => !h.sold).reduce((s, h) => s + usdValue(h, prices, rate, setP, fundP), 0);
     const costItems = items.filter((h) => hasCost(h, rate));
     // Only show group-level cost/PL if ALL active items have a cost basis
     // Otherwise it would mix costed + uncosted items and show a misleading return %
@@ -329,19 +400,20 @@ export default function App() {
     const cost = allCosted ? costItems.reduce((s, h) => s + usdCost(h, rate), 0) : null;
     const itemRows = items.map((h) => ({
       name: h.name, id: h.id,
-      val: usdValue(h, prices, rate, setP),
+      val: usdValue(h, prices, rate, setP, fundP),
       cost: hasCost(h, rate) ? usdCost(h, rate) : null,
       live: h.type === "live",
       set: h.type === "set",
+      fund: h.type === "fund",
       chg: h.type === "live" ? changes[h.coin] : undefined,
       note: h.sold ? "Sold" : h.note,
     }));
     return { g, label: GROUPS_META[g].label, color: GROUPS_META[g].color, val, cost, items: itemRows };
-  }).filter((r) => r.items.length > 0), [holdings, prices, rate, changes, setP]);
+  }).filter((r) => r.items.length > 0), [holdings, prices, rate, changes, setP, fundP]);
 
   const totalVal = groups.reduce((s, r) => s + r.val, 0);
   const basisCost = holdings.filter((h) => hasCost(h, rate)).reduce((s, h) => s + usdCost(h, rate), 0);
-  const basisPL = holdings.filter((h) => hasCost(h, rate)).reduce((s, h) => s + (usdValue(h, prices, rate, setP) - usdCost(h, rate)), 0);
+  const basisPL = holdings.filter((h) => hasCost(h, rate)).reduce((s, h) => s + (usdValue(h, prices, rate, setP, fundP) - usdCost(h, rate)), 0);
   const basisPLpct = basisCost > 0 ? (basisPL / basisCost) * 100 : 0;
   const GRAND = { value: totalVal, cost: basisCost, pl: basisPL, plPct: basisPLpct };
 
@@ -535,11 +607,11 @@ export default function App() {
             <EditHoldings holdings={holdings} expanded={expanded} setExpanded={setExpanded}
               update={update} remove={remove} addHolding={addHolding} resetData={resetData}
               exportBackup={exportBackup} importBackup={importBackup} prices={prices} rate={rate} fthb={fthb} setP={setP}
-              setMode={setMode} setMissing={setMissing} />
+              setMode={setMode} setMissing={setMissing} fundP={fundP} fundMode={fundMode} fundMissing={fundMissing} />
           )}
         </div>
 
-        <div className="footer">USD · ฿THB at {rate} · crypto &amp; gold live via CoinGecko · SET stocks via Yahoo Finance ({setMode === "live" ? `updated ${stocksUpdatedAt?.toLocaleTimeString()}` : setMode === "offline" ? "offline · using last known prices" : "loading"}) · ETF at last NAV · {updatedAt ? `crypto updated ${updatedAt.toLocaleTimeString()}` : "loading"}</div>
+        <div className="footer">USD · ฿THB at {rate} · crypto &amp; gold live via CoinGecko · SET stocks via Yahoo Finance ({setMode === "live" ? `updated ${stocksUpdatedAt?.toLocaleTimeString()}` : setMode === "offline" ? "offline · using last known prices" : "loading"}) · funds at daily NAV via Finnomena{fundMode === "offline" ? " (offline · using last saved NAV)" : ""} · {updatedAt ? `crypto updated ${updatedAt.toLocaleTimeString()}` : "loading"}</div>
       </div>
 
       {undo && (
@@ -782,6 +854,7 @@ function PnLTable({ groups, grand, hov, onHov }) {
                           {item.name}
                           {item.live && <span className="live-badge">LIVE</span>}
                           {item.set && <span className="live-badge" style={{ color:"#1FB6C9", borderColor:"rgba(31,182,201,.25)", background:"rgba(31,182,201,.07)" }}>SET</span>}
+                          {item.fund && <span className="live-badge" style={{ color:"#4A7FD4", borderColor:"rgba(74,127,212,.3)", background:"rgba(74,127,212,.08)" }}>NAV</span>}
                           {typeof item.chg === "number" && <span className="chg-chip" style={{ color: item.chg >= 0 ? "var(--pos)" : "var(--neg)" }}>{item.chg >= 0 ? "+" : ""}{item.chg.toFixed(1)}%</span>}
                           {item.note && <span className="note-chip">{item.note}</span>}
                         </td>
@@ -809,7 +882,7 @@ function PnLTable({ groups, grand, hov, onHov }) {
   );
 }
 
-function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHolding, resetData, exportBackup, importBackup, prices, rate, fthb, setP, setMode, setMissing }) {
+function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHolding, resetData, exportBackup, importBackup, prices, rate, fthb, setP, setMode, setMissing, fundP, fundMode, fundMissing }) {
   const [showAdd, setShowAdd] = React.useState(false);
   const fileRef = React.useRef(null);
   const staleCount = holdings.filter(isStaleManual).length;
@@ -848,7 +921,7 @@ function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHold
         const items = holdings.filter((h) => h.group === g);
         if (!items.length) return null;
         const isOpen = !!expanded[g];
-        const gv = items.filter((h) => !h.sold).reduce((s, h) => s + usdValue(h, prices, rate, setP), 0);
+        const gv = items.filter((h) => !h.sold).reduce((s, h) => s + usdValue(h, prices, rate, setP, fundP), 0);
         const col = groupColor(g);
         return (
           <div key={g} style={{ marginBottom: 8 }}>
@@ -882,10 +955,24 @@ function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHold
                           const type = e.target.value;
                           if (type === "live") update(h.id, { type, coin: h.coin || "bitcoin", qty: h.qty || 0, costUSD: h.costUSD || 0 });
                           else if (type === "set") update(h.id, { type, ticker: h.ticker || "", qty: h.qty || 0, costTHB: h.costTHB || 0 });
+                          else if (type === "fund") {
+                            // Carry over what we know from a manual entry: code from the name, cost in THB,
+                            // and the last value (used to estimate units once the NAV arrives)
+                            const toTHB = (v) => (h.ccy === "USD" ? (+v || 0) * (rate || 1) : +v || 0);
+                            const fromManual = h.type === "manual";
+                            update(h.id, {
+                              type,
+                              fundCode: h.fundCode || String(h.name || "").trim().toUpperCase(),
+                              qty: h.type === "fund" ? h.qty : 0,
+                              costTHB: h.costTHB || (fromManual ? Math.round(toTHB(h.cost) * 100) / 100 : 0),
+                              estimateFromTHB: fromManual && +h.value > 0 ? toTHB(h.value) : undefined,
+                            });
+                          }
                           else update(h.id, { type, ccy: h.ccy || "USD", cost: h.cost || 0, value: h.value || 0, valueUpdatedAt: Date.now() });
                         }}>
                           <option value="live">Live (Crypto)</option>
                           <option value="set">Live (SET Stock)</option>
+                          <option value="fund">Live (Fund NAV)</option>
                           <option value="manual">Manual</option>
                         </select>
                       </div>
@@ -930,6 +1017,23 @@ function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHold
                         </div>
                       </div>
                     )}
+                    {h.type === "fund" && (
+                      <div className="erow">
+                        <div style={{ flex: "1 1 120px" }}>
+                          <span className="elbl">Fund code</span>
+                          <input className="ein" value={h.fundCode || ""} placeholder="e.g. SCBRM3" style={{ fontFamily:"'Sora',sans-serif", textTransform:"uppercase" }}
+                            onChange={(e) => update(h.id, { fundCode: e.target.value.toUpperCase() })} />
+                        </div>
+                        <div style={{ flex: "1 1 100px" }}>
+                          <span className="elbl">Units held</span>
+                          <NumInput className="ein" value={h.qty} onChange={(v) => update(h.id, { qty: v, unitsEstimated: false, estimateFromTHB: undefined })} />
+                        </div>
+                        <div style={{ flex: "1 1 100px" }}>
+                          <span className="elbl">Cost (THB)</span>
+                          <NumInput className="ein" value={h.costTHB || 0} onChange={(v) => update(h.id, { costTHB: v })} />
+                        </div>
+                      </div>
+                    )}
                     {h.type === "manual" && (
                       <div className="erow">
                         <div style={{ flex: "0 1 75px" }}>
@@ -950,11 +1054,29 @@ function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHold
                     )}
                     {h.note && <div className="enote">{h.note}</div>}
                     <div className="eval">
-                      → {fu(usdValue(h, prices, rate, setP))} <span style={{ color: "var(--fg4)" }}>({fthb(usdValue(h, prices, rate, setP))})</span>
+                      → {fu(usdValue(h, prices, rate, setP, fundP))} <span style={{ color: "var(--fg4)" }}>({fthb(usdValue(h, prices, rate, setP, fundP))})</span>
                       {h.type === "live" && <span style={{ color: "var(--accent)", marginLeft: 8 }}>@ {fu(prices[h.coin] ?? FALLBACK_PRICES[h.coin])}/unit</span>}
                       {h.type === "set" && setP[h.ticker] && <span style={{ color: "#1FB6C9", marginLeft: 8 }}>@ ฿{setP[h.ticker]}/share · SET</span>}
                       {h.type === "set" && !setP[h.ticker] && h.ticker && setMode === "live" && setMissing.includes(h.ticker) && (
                         <span style={{ color: "var(--neg)", marginLeft: 8 }}>No SET price found for "{h.ticker}" — check the ticker</span>
+                      )}
+                      {h.type === "fund" && (() => {
+                        const f = fundP[fundKeyOf(h)];
+                        const unit = fundUnitUSD(f, rate);
+                        if (f && unit != null) {
+                          const asOf = f.date ? new Date(f.date).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : null;
+                          return (
+                            <span style={{ color: "#4A7FD4", marginLeft: 8 }}>
+                              @ ${unit.toFixed(4)}/unit (฿{f.nav}){asOf ? ` · NAV as of ${asOf}` : ""}{f.resolved && f.resolved !== fundKeyOf(h) ? ` · ${f.resolved}` : ""}
+                            </span>
+                          );
+                        }
+                        if (fundKeyOf(h) && fundMode === "live" && fundMissing.includes(fundKeyOf(h)))
+                          return <span style={{ color: "var(--neg)", marginLeft: 8 }}>No fund found for "{fundKeyOf(h)}" — check the code</span>;
+                        return <span style={{ color: "var(--fg3)", marginLeft: 8 }}>· loading NAV…</span>;
+                      })()}
+                      {h.type === "fund" && h.unitsEstimated && (
+                        <span className="eage stale">· units estimated from your last value — enter the exact number from your SCB app</span>
                       )}
                       {h.type === "manual" && (
                         <span className={isStaleManual(h) ? "eage stale" : "eage"}>
