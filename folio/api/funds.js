@@ -1,57 +1,109 @@
-// Vercel Serverless Function — Thai mutual fund daily prices (NAV) via Finnomena
-// GET /api/funds?codes=SCBRM3,SCBRMNDQ(A) → latest NAV for each fund code
+// Vercel Serverless Function — Thai mutual fund daily prices (NAV) from the Thai SEC Open Data API (V2)
+// GET /api/funds?codes=SCBRM3,SCBRMNDQ(A) → latest NAV per fund code
+// GET /api/funds?codes=SCBRM3&debug=1     → also returns the raw SEC lookups (no keys), for troubleshooting
 //
-// NAVs are published once per trading day, after the market closes, so the
-// answer is cached at Vercel's CDN for an hour. Finnomena's API is public but
-// unofficial; if it changes, the app keeps showing the last NAV it saved.
+// Needs a free SEC developer key (secopendata.sec.or.th → Subscriptions → Fund Daily Info + fund general info),
+// stored in Vercel as the environment variable SEC_API_KEY. NAVs are published once per trading day,
+// so answers are cached at Vercel's CDN for an hour.
 
-const BASE = "https://www.finnomena.com/fn3/api/fund/v2/public/funds";
-const HEADERS = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", Accept: "application/json" };
+const BASE = "https://api.sec.or.th";
 const VALID_CODE = /^[A-Z0-9][A-Z0-9&()\-./ ]{0,39}$/;
 const MAX_CODES = 30;
-const LIST_TTL_MS = 24 * 60 * 60 * 1000;
+const LOOKUP_TTL_MS = 24 * 60 * 60 * 1000;
+const NAV_WINDOW_DAYS = 14;
 
-// short_code → fund_id, kept while this function instance stays warm (the full list is ~3 MB)
-let codeMap = null;
-let codeMapAt = 0;
+// code → { projId, className, resolved }, kept while this function instance stays warm
+const lookupCache = new Map();
 
-async function getCodeMap() {
-  if (codeMap && Date.now() - codeMapAt < LIST_TTL_MS) return codeMap;
-  const r = await fetch(BASE, { headers: HEADERS });
-  if (!r.ok) throw new Error(`Finnomena fund list returned ${r.status}`);
-  const d = await r.json();
-  const map = new Map();
-  for (const f of d?.data || []) {
-    if (f && f.short_code && f.fund_id) map.set(String(f.short_code).toUpperCase(), f.fund_id);
-  }
-  if (!map.size) throw new Error("Finnomena fund list was empty");
-  codeMap = map;
-  codeMapAt = Date.now();
-  return map;
-}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const norm = (s) => String(s || "").trim().toUpperCase();
 
 function parseCodes(q) {
   if (!q) return [];
   const list = String(Array.isArray(q) ? q.join(",") : q)
     .split(",")
-    .map((s) => s.trim().toUpperCase())
+    .map(norm)
     .filter((s) => VALID_CODE.test(s));
   return [...new Set(list)].slice(0, MAX_CODES);
 }
 
-// Finnomena lists some share classes with a suffix, e.g. SCBRMNDQ is "SCBRMNDQ(A)"
-function resolve(map, code) {
-  if (map.has(code)) return code;
-  for (const suffix of ["(A)", "-A"]) if (map.has(code + suffix)) return code + suffix;
-  return null;
+// "SCBRMNDQ(A)" → { base: "SCBRMNDQ", cls: "A" };  "SCBLTT-SSF" → { base: "SCBLTT-SSF", cls: null }
+function splitClass(code) {
+  const m = code.match(/^(.*?)\(([^)]+)\)$/);
+  return m ? { base: m[1].trim(), cls: m[2].trim() } : { base: code, cls: null };
 }
 
-async function fetchLatest(fundId) {
-  const r = await fetch(`${BASE}/${encodeURIComponent(fundId)}/latest`, { headers: HEADERS });
-  if (!r.ok) throw new Error(`Finnomena returned ${r.status} for ${fundId}`);
-  const d = (await r.json())?.data;
-  if (!d || typeof d.value !== "number") throw new Error(`No NAV for ${fundId}`);
-  return { nav: d.value, date: d.date || null, currency: d.currency || "THB", dChange: typeof d.d_change === "number" ? d.d_change : null };
+async function secGet(path, params, key) {
+  const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== ""));
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const r = await fetch(`${BASE}${path}?${qs}`, {
+      headers: { "Ocp-Apim-Subscription-Key": key, Accept: "application/json" },
+    });
+    if (r.status === 204) return { items: [] };
+    if (r.status === 421 || r.status === 429 || r.status >= 500) {
+      const wait = Math.min(5000, (+r.headers.get("retry-after") || 1) * 1000);
+      await sleep(wait);
+      continue;
+    }
+    if (r.status === 401) throw new Error("SEC rejected the API key (401) — check SEC_API_KEY in Vercel");
+    if (r.status === 403) throw new Error(`SEC key isn't subscribed to ${path} (403) — enable that product on secopendata.sec.or.th`);
+    if (!r.ok) throw new Error(`SEC returned ${r.status} for ${path}`);
+    return r.json();
+  }
+  throw new Error(`SEC kept rate-limiting ${path}`);
+}
+
+// Find the fund project (and share class, if any) for a code like "SCBRM3" or "SCBAUTO(SSF)"
+async function lookup(code, key, debug) {
+  const hit = lookupCache.get(code);
+  if (hit && Date.now() - hit.at < LOOKUP_TTL_MS) return hit.value;
+
+  const { base, cls } = splitClass(code);
+  const tries = [...new Set([code, base])];
+  let items = [];
+  for (const q of tries) {
+    const d = await secGet("/v2/fund/general-info/profiles", { project_info: q, page_size: 100 }, key);
+    items = items.concat(d.items || []);
+    await sleep(70);
+  }
+  if (debug) debug.profiles[code] = items.slice(0, 15).map((p) => ({
+    proj_id: p.proj_id, proj_abbr_name: p.proj_abbr_name, fund_class_name: p.fund_class_name, fund_status: p.fund_status,
+  }));
+
+  const active = (p) => !p.fund_status || norm(p.fund_status) === "RG";
+  const pick =
+    // the class itself is listed under the full code, e.g. proj_abbr_name or fund_class_name = "SCBAUTO(SSF)"
+    items.find((p) => active(p) && (norm(p.proj_abbr_name) === code || norm(p.fund_class_name) === code)) ||
+    // the project is listed under the base code, with the class named separately
+    items.find((p) => active(p) && norm(p.proj_abbr_name) === base && (!cls || norm(p.fund_class_name) === cls || norm(p.fund_class_name).endsWith(`(${cls})`))) ||
+    // plain fund code without classes
+    (!cls && items.find((p) => active(p) && norm(p.proj_abbr_name) === base)) ||
+    null;
+
+  const value = pick
+    ? { projId: pick.proj_id, className: pick.fund_class_name || null, resolved: pick.fund_class_name && cls ? `${pick.proj_abbr_name} ${pick.fund_class_name}` : pick.proj_abbr_name }
+    : null;
+  lookupCache.set(code, { at: Date.now(), value });
+  return value;
+}
+
+async function latestNav(info, key, debug, code) {
+  const end = new Date();
+  const start = new Date(end.getTime() - NAV_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+  const fmt = (d) => d.toISOString().slice(0, 10);
+  const params = { proj_id: info.projId, start_nav_date: fmt(start), end_nav_date: fmt(end), page_size: 100 };
+  if (info.className) params.fund_class_name = info.className;
+  const d = await secGet("/v2/fund/daily-info/nav", params, key);
+  let rows = d.items || [];
+  if (info.className) rows = rows.filter((r) => !r.fund_class_name || norm(r.fund_class_name) === norm(info.className));
+  if (debug) debug.nav[code] = rows.slice(0, 3);
+  const priced = rows
+    .map((r) => ({ r, nav: Number(r.last_val) }))
+    .filter((x) => x.nav > 0)
+    .sort((a, b) => String(b.r.nav_date).localeCompare(String(a.r.nav_date)));
+  if (!priced.length) return null;
+  const top = priced[0];
+  return { nav: top.nav, date: top.r.nav_date || null, currency: "THB", resolved: info.resolved };
 }
 
 export default async function handler(req, res) {
@@ -59,30 +111,39 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Methods", "GET");
 
   const codes = parseCodes(req.query && req.query.codes);
+  const debug = req.query && req.query.debug ? { profiles: {}, nav: {}, errors: {} } : null;
+  const key = process.env.SEC_API_KEY;
+
+  if (!key) {
+    res.status(200).json({ ok: false, error: "Fund prices aren't set up yet: add SEC_API_KEY in Vercel", funds: {}, missing: codes });
+    return;
+  }
   if (!codes.length) {
-    res.status(200).json({ ok: false, error: "No fund codes given", funds: {} });
+    res.status(200).json({ ok: false, error: "No fund codes given", funds: {}, missing: [] });
     return;
   }
 
-  try {
-    const map = await getCodeMap();
-    const funds = {};
-    const missing = [];
-    const jobs = codes.map(async (code) => {
-      const resolved = resolve(map, code);
-      if (!resolved) { missing.push(code); return; }
-      try {
-        funds[code] = { ...(await fetchLatest(map.get(resolved))), resolved };
-      } catch (e) {
-        missing.push(code);
-      }
-    });
-    await Promise.all(jobs);
-
-    res.setHeader("Cache-Control", "s-maxage=3600, stale-while-revalidate=86400");
-    res.status(200).json({ ok: Object.keys(funds).length > 0, funds, missing, fetchedAt: new Date().toISOString() });
-  } catch (err) {
-    // Don't crash — the app falls back to the last NAV it saved
-    res.status(200).json({ ok: false, error: err.message, funds: {}, missing: codes });
+  const funds = {};
+  const missing = [];
+  let lastError = null;
+  // One at a time — the SEC asks for at least 60 ms between requests
+  for (const code of codes) {
+    try {
+      const info = await lookup(code, key, debug);
+      if (!info) { missing.push(code); continue; }
+      await sleep(70);
+      const nav = await latestNav(info, key, debug, code);
+      if (nav) funds[code] = nav; else missing.push(code);
+    } catch (e) {
+      missing.push(code);
+      lastError = e.message;
+      if (debug) debug.errors[code] = e.message;
+      if (/401|403/.test(e.message)) break; // the key itself is the problem; no point trying the rest
+    }
+    await sleep(70);
   }
+
+  const ok = Object.keys(funds).length > 0;
+  if (ok && !debug) res.setHeader("Cache-Control", "s-maxage=3600, stale-while-revalidate=86400");
+  res.status(200).json({ ok, funds, missing, error: ok ? undefined : lastError || "No prices found", fetchedAt: new Date().toISOString(), ...(debug ? { debug } : {}) });
 }

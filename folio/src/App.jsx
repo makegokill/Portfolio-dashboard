@@ -86,7 +86,10 @@ function usdValue(h, prices, rate, setP, fundP) {
   }
   if (h.type === "fund") {
     const unit = fundUnitUSD(fundP?.[fundKeyOf(h)], rate);
-    return unit != null ? (+h.qty || 0) * unit : 0;
+    if (unit != null && +h.qty > 0) return (+h.qty || 0) * unit;
+    // No daily price yet (or no units entered): keep showing the last manual value instead of $0
+    if (+h.value > 0) return h.ccy === "USD" ? +h.value : +h.value / (rate || 1);
+    return 0;
   }
   if (h.ccy === "USD") return +h.value || 0;
   return (+h.value || 0) / (rate || 1);
@@ -177,6 +180,7 @@ export default function App() {
   const [fundsUpdatedAt, setFundsUpdatedAt] = useState(() => (cache.fundAt ? new Date(cache.fundAt) : null));
   const [fundMode, setFundMode] = useState("idle");
   const [fundMissing, setFundMissing] = useState([]);
+  const [fundError, setFundError] = useState(null);
   const lastFundFetch = useRef(cache.fundAt || 0);
 
   // Refs so timers and app-resume handlers always see the latest values
@@ -300,9 +304,13 @@ export default function App() {
       if (d.ok && d.funds) {
         setFundP((prev) => ({ ...prev, ...d.funds }));
         setFundMissing(codes.filter((c) => !d.funds[c]));
-        setFundMode("live"); setFundsUpdatedAt(new Date());
+        setFundMode("live"); setFundsUpdatedAt(new Date()); setFundError(null);
       } else throw new Error(d.error || "no data");
-    } catch (e) { setFundMode("offline"); }
+    } catch (e) {
+      setFundMode("offline");
+      setFundError(e && e.message && e.message !== "api error" ? e.message : "Couldn't reach the fund price service");
+      lastFundFetch.current = Date.now() - 2.5 * 60 * 60 * 1000; // try again in ~30 min, not 3 h
+    }
   };
   const fundKey = fundCodesOf(holdings).join(",");
   const fundKeyRef = useRef(null);
@@ -607,11 +615,11 @@ export default function App() {
             <EditHoldings holdings={holdings} expanded={expanded} setExpanded={setExpanded}
               update={update} remove={remove} addHolding={addHolding} resetData={resetData}
               exportBackup={exportBackup} importBackup={importBackup} prices={prices} rate={rate} fthb={fthb} setP={setP}
-              setMode={setMode} setMissing={setMissing} fundP={fundP} fundMode={fundMode} fundMissing={fundMissing} />
+              setMode={setMode} setMissing={setMissing} fundP={fundP} fundMode={fundMode} fundMissing={fundMissing} fundError={fundError} />
           )}
         </div>
 
-        <div className="footer">USD · ฿THB at {rate} · crypto &amp; gold live via CoinGecko · SET stocks via Yahoo Finance ({setMode === "live" ? `updated ${stocksUpdatedAt?.toLocaleTimeString()}` : setMode === "offline" ? "offline · using last known prices" : "loading"}) · funds at daily NAV via Finnomena{fundMode === "offline" ? " (offline · using last saved NAV)" : ""} · {updatedAt ? `crypto updated ${updatedAt.toLocaleTimeString()}` : "loading"}</div>
+        <div className="footer">USD · ฿THB at {rate} · crypto &amp; gold live via CoinGecko · SET stocks via Yahoo Finance ({setMode === "live" ? `updated ${stocksUpdatedAt?.toLocaleTimeString()}` : setMode === "offline" ? "offline · using last known prices" : "loading"}) · funds at daily NAV via the Thai SEC{fundMode === "offline" ? " (offline · using last saved NAV)" : ""} · {updatedAt ? `crypto updated ${updatedAt.toLocaleTimeString()}` : "loading"}</div>
       </div>
 
       {undo && (
@@ -882,7 +890,7 @@ function PnLTable({ groups, grand, hov, onHov }) {
   );
 }
 
-function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHolding, resetData, exportBackup, importBackup, prices, rate, fthb, setP, setMode, setMissing, fundP, fundMode, fundMissing }) {
+function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHolding, resetData, exportBackup, importBackup, prices, rate, fthb, setP, setMode, setMissing, fundP, fundMode, fundMissing, fundError }) {
   const [showAdd, setShowAdd] = React.useState(false);
   const fileRef = React.useRef(null);
   const staleCount = holdings.filter(isStaleManual).length;
@@ -1071,9 +1079,12 @@ function EditHoldings({ holdings, expanded, setExpanded, update, remove, addHold
                             </span>
                           );
                         }
+                        const usingManual = +h.value > 0 ? " · showing your last manual value for now" : "";
                         if (fundKeyOf(h) && fundMode === "live" && fundMissing.includes(fundKeyOf(h)))
-                          return <span style={{ color: "var(--neg)", marginLeft: 8 }}>No fund found for "{fundKeyOf(h)}" — check the code</span>;
-                        return <span style={{ color: "var(--fg3)", marginLeft: 8 }}>· loading NAV…</span>;
+                          return <span style={{ color: "var(--neg)", marginLeft: 8 }}>No fund found for "{fundKeyOf(h)}" — check the code{usingManual}</span>;
+                        if (fundMode === "offline" && fundError)
+                          return <span style={{ color: "#E8B923", marginLeft: 8 }}>· {fundError}{usingManual}</span>;
+                        return <span style={{ color: "var(--fg3)", marginLeft: 8 }}>· loading NAV…{usingManual}</span>;
                       })()}
                       {h.type === "fund" && h.unitsEstimated && (
                         <span className="eage stale">· units estimated from your last value — enter the exact number from your SCB app</span>
