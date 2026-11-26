@@ -51,7 +51,6 @@ const PRICE_CACHE_KEY = "folio-prices-v1";
 const SEED_SET_PRICES = { CPAXT: 15.20, JCK: 0.13, KEX: null, SCGP: 23.60, TRUE: 13.80, DELTA: 237.50 };
 const STALE_DAYS = 30;
 const DAY_MS = 24 * 60 * 60 * 1000;
-const MAX_FLOWS = 500;
 
 function readPriceCache() {
   try {
@@ -113,8 +112,6 @@ const signed = (v) => (v >= 0 ? "+" : MINUS) + fu(v);
 const pctTxt = (p) => (p >= 0 ? "+" : MINUS) + Math.abs(p).toFixed(1) + "%";
 const tone = (v) => (v >= 0 ? "var(--gain)" : "var(--loss)");
 const round2 = (n) => Math.round(n * 100) / 100;
-const monthKey = (t) => { const d = new Date(t); return d.getFullYear() * 12 + d.getMonth(); };
-const monthName = (t = Date.now()) => new Date(t).toLocaleString("en-US", { month: "short" });
 const num = (x, digits) => (+x || 0).toLocaleString("en-US", { maximumFractionDigits: digits });
 
 // One line under a holding's name: how much you hold and where its price comes from
@@ -175,10 +172,10 @@ export default function App() {
   const [sheet, setSheet] = useState(null); // { h, isNew } — the holding open in the sheet
   const [loaded, setLoaded] = useState(false);
   const [undo, setUndo] = useState(null); // { kind: "delete", h, idx } or { kind: "reset", ... }
-  // Money you put in or took out, one entry per buy/sell you record: { id, at, holdingId, name, usd, thb }
-  const [flows, setFlows] = useState([]);
   // Your own names for the categories (e.g. "ETF" → "Mutual funds"); empty = the built-in name
   const [groupLabels, setGroupLabels] = useState({});
+  // The highest total Folio has seen on this device: { usd, at }
+  const [peak, setPeak] = useState(null);
   const labelOf = (g) => String(groupLabels[g] || "").trim() || GROUPS_META[g]?.label || g;
   const renameGroup = (g, name) => setGroupLabels((l) => {
     const next = { ...l };
@@ -274,7 +271,7 @@ export default function App() {
           const d = JSON.parse(raw);
           if (Array.isArray(d.holdings)) setHoldings(d.holdings);
           if (d.groupLabels && typeof d.groupLabels === "object") setGroupLabels(d.groupLabels);
-          if (Array.isArray(d.flows)) setFlows(d.flows);
+          if (d.peak && typeof d.peak.usd === "number") setPeak(d.peak);
           // Only keep a saved rate if you typed it yourself; otherwise it refreshes from the live feed
           if (d.rateManual === true && typeof d.rate === "number" && d.rate > 0) { setRate(d.rate); setRateManual(true); }
         }
@@ -287,7 +284,7 @@ export default function App() {
     if (!loaded) return;
     (async () => {
       try {
-        const payload = JSON.stringify({ holdings, rate, rateManual, groupLabels, flows });
+        const payload = JSON.stringify({ holdings, rate, rateManual, groupLabels, peak });
         if (typeof window !== "undefined" && window.localStorage) {
           window.localStorage.setItem(STORAGE_KEY, payload);
         }
@@ -296,7 +293,7 @@ export default function App() {
         }
       } catch (e) { /* session only */ }
     })();
-  }, [holdings, rate, rateManual, groupLabels, flows, loaded]);
+  }, [holdings, rate, rateManual, groupLabels, peak, loaded]);
 
   // Remember the latest prices so the next visit opens with them
   useEffect(() => {
@@ -443,14 +440,13 @@ export default function App() {
     .map((r) => ({ ...r, share: totalVal > 0 ? (r.val / totalVal) * 100 : 0 }))
     .sort((a, b) => b.val - a.val), [groups, totalVal]);
 
-  // Money added (or taken out) this calendar month, from the buys and sells you recorded
-  const thisMonth = flows.filter((f) => monthKey(f.at) === monthKey(Date.now()));
-  const month = {
-    count: thisMonth.length,
-    usd: thisMonth.reduce((s, f) => s + (+f.usd || 0), 0),
-    thb: thisMonth.reduce((s, f) => s + (+f.thb || 0), 0),
-    name: monthName(),
-  };
+  // Remember the highest total, but only from live prices (not the built-in fallbacks)
+  const roundedTotal = Math.round(GRAND.value);
+  useEffect(() => {
+    if (!loaded || priceMode !== "live" || !(roundedTotal > 0)) return;
+    setPeak((p) => (!p || roundedTotal > p.usd ? { usd: roundedTotal, at: Date.now() } : p));
+  }, [loaded, priceMode, roundedTotal]);
+  const resetPeak = () => setPeak(roundedTotal > 0 ? { usd: roundedTotal, at: Date.now() } : null);
 
   const count = useCountUp(Math.round(GRAND.value));
 
@@ -471,7 +467,7 @@ export default function App() {
     if (undo.kind === "reset") {
       setHoldings(undo.holdings);
       setGroupLabels(undo.groupLabels || {});
-      setFlows(undo.flows || []);
+      setPeak(undo.peak || null);
     } else {
       setHoldings((hs) => { const next = [...hs]; next.splice(Math.min(undo.idx, next.length), 0, undo.h); return next; });
     }
@@ -482,10 +478,10 @@ export default function App() {
   const resetData = () => {
     if (typeof window === "undefined") return;
     if (!window.confirm("Erase all your holdings on this iPhone and go back to the starter list?\n\nSave a backup first if you want to keep them. You'll have 10 seconds to undo.")) return;
-    startUndo({ kind: "reset", holdings, groupLabels, flows }, 10000);
+    startUndo({ kind: "reset", holdings, groupLabels, peak }, 10000);
     setHoldings(SEED_HOLDINGS);
     setGroupLabels({});
-    setFlows([]);
+    setPeak(null);
   };
 
   const openHolding = (h) => setSheet({ h, isNew: false });
@@ -493,17 +489,16 @@ export default function App() {
     h: { id: uid(), name: "", group, type: "manual", ccy: "USD", cost: 0, value: 0, valueUpdatedAt: Date.now() },
     isNew: true,
   });
-  const saveSheet = (d, newFlows) => {
+  const saveSheet = (d) => {
     const clean = { ...d, name: String(d.name || "").trim() || "New asset" };
     setHoldings((hs) => (sheet && sheet.isNew ? [...hs, clean] : hs.map((h) => (h.id === clean.id ? clean : h))));
-    if (newFlows.length) setFlows((f) => [...f, ...newFlows].slice(-MAX_FLOWS));
     setSheet(null);
   };
 
   // ── Backup: save holdings to a .json file / restore one ──
   const exportBackup = () => {
     try {
-      const payload = JSON.stringify({ app: "folio", version: 7, exportedAt: new Date().toISOString(), rate, rateManual, groupLabels, flows, holdings }, null, 2);
+      const payload = JSON.stringify({ app: "folio", version: 7, exportedAt: new Date().toISOString(), rate, rateManual, groupLabels, peak, holdings }, null, 2);
       const d = new Date();
       const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
       const filename = `folio-backup-${stamp}.json`;
@@ -548,7 +543,7 @@ export default function App() {
         if (!window.confirm(`Restore the backup from ${when} (${d.holdings.length} holdings)? This replaces what's saved on this iPhone.`)) return;
         setHoldings(d.holdings);
         setGroupLabels(d.groupLabels && typeof d.groupLabels === "object" ? d.groupLabels : {});
-        setFlows(Array.isArray(d.flows) ? d.flows : []);
+        setPeak(d.peak && typeof d.peak.usd === "number" ? d.peak : null);
         if (d.rateManual === true && typeof d.rate === "number" && d.rate > 0) { setRate(d.rate); setRateManual(true); }
         else setRateManual(false);
         window.alert("Backup restored.");
@@ -577,7 +572,7 @@ export default function App() {
           <Overview
             grand={GRAND} count={count} rate={rate} rateManual={rateManual} rateOpen={rateOpen} setRateOpen={setRateOpen}
             setRate={(v) => { if (v > 0) { setRateManual(true); setRate(v); } }} liveRate={() => setRateManual(false)}
-            alloc={alloc} openCat={openCat} setOpenCat={setOpenCat} month={month}
+            alloc={alloc} openCat={openCat} setOpenCat={setOpenCat} peak={peak} resetPeak={resetPeak}
             priceMode={priceMode} lastPriceTime={lastPriceTime} refresh={refreshAll} openHolding={openHolding} />
         )}
         {tab === "gains" && <Gains groups={groups} grand={GRAND} openHolding={openHolding} />}
@@ -672,35 +667,70 @@ const Chevron = ({ open, down }) => (
   </svg>
 );
 
-function Donut({ alloc }) {
+function polar(cx, cy, r, deg) { const a = (deg - 90) * Math.PI / 180; return [cx + r * Math.cos(a), cy + r * Math.sin(a)]; }
+function arcPath(cx, cy, oR, iR, s, e) {
+  const g = 1.6, a = s + g / 2, b = e - g / 2;
+  if (b - a < 0.4) return "";
+  const [x1, y1] = polar(cx, cy, oR, a), [x2, y2] = polar(cx, cy, oR, b);
+  const [x3, y3] = polar(cx, cy, iR, b), [x4, y4] = polar(cx, cy, iR, a);
+  const la = b - a > 180 ? 1 : 0, f = (n) => n.toFixed(3);
+  return `M${f(x1)},${f(y1)} A${oR},${oR} 0 ${la} 1 ${f(x2)},${f(y2)} L${f(x3)},${f(y3)} A${iR},${iR} 0 ${la} 0 ${f(x4)},${f(y4)} Z`;
+}
+
+// Tap a slice: it stands out, the others fade, the middle shows that category,
+// and its row below opens with the holdings inside. Tap it again (or the middle) to go back.
+function Donut({ alloc, selected, onSelect }) {
   if (!alloc.length) return null;
-  let acc = 0;
-  const gap = 0.9;
-  const stops = ["var(--paper) 0deg " + gap + "deg"];
-  alloc.forEach((a) => {
-    const a0 = acc * 3.6, a1 = (acc + a.share) * 3.6;
-    stops.push(`${a.color} ${a0 + gap}deg ${Math.max(a0 + gap, a1 - gap)}deg`);
-    stops.push(`var(--paper) ${Math.max(a0 + gap, a1 - gap)}deg ${a1}deg`);
-    acc += a.share;
-  });
-  const top = alloc[0];
+  const C = 120, OR = 106, IR = 72;
+  let cum = 0;
+  const segs = alloc.map((a) => { const st = cum * 3.6; cum += a.share; return { ...a, st, en: cum * 3.6 }; });
+  const active = selected ? alloc.find((a) => a.g === selected) : null;
+  const shown = active || alloc[0];
   const label = "Allocation: " + alloc.map((a) => `${a.label} ${a.share.toFixed(1)}%`).join(", ");
   return (
-    <div className="donut" role="img" aria-label={label} style={{ background: `conic-gradient(${stops.join(", ")})` }}>
-      <div className="donut-hole">
-        <span className="muted small">Biggest</span>
-        <span className="donut-name">{top.label}</span>
-        <span className="muted">{top.share.toFixed(1)}%</span>
+    <div className="donut-wrap">
+      <svg className="donut" viewBox="0 0 240 240" role="img" aria-label={label}>
+        {segs.map((s) => {
+          const on = !!active && s.g === active.g;
+          return (
+            <path key={s.g} className="seg" fill={s.color} opacity={active && !on ? 0.25 : 1}
+              d={arcPath(C, C, on ? OR + 8 : OR, on ? IR - 3 : IR, s.st, s.en)}
+              onClick={() => onSelect(on ? null : s.g)} />
+          );
+        })}
+        <circle cx={C} cy={C} r={IR - 4} fill="transparent" onClick={() => { if (active) onSelect(null); }} />
+      </svg>
+      <div className="donut-hole" aria-hidden="true">
+        <span className="muted small">{active ? fu(active.val) : "Biggest"}</span>
+        <span className="donut-name">{shown.label}</span>
+        <span className="muted">{shown.share.toFixed(1)}%</span>
       </div>
+      <p className="muted small center">{active ? "Tap the middle to see everything" : "Tap a slice to see what's in it"}</p>
     </div>
   );
 }
 
-function Overview({ grand, count, rate, rateManual, rateOpen, setRateOpen, setRate, liveRate, alloc, openCat, setOpenCat, month, priceMode, lastPriceTime, refresh, openHolding }) {
-  const out = month.usd < -0.5;
-  const stampTitle = `${out ? "Taken out in" : "Added in"} ${month.name}`;
-  const stampAmt = month.count ? signed(month.usd) : "$0";
-  const stampSub = month.count ? thb(month.thb) : "nothing yet";
+const dayMonth = (t) => {
+  const d = new Date(t);
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", ...(d.getFullYear() === new Date().getFullYear() ? {} : { year: "numeric" }) });
+};
+
+function Overview({ grand, count, rate, rateManual, rateOpen, setRateOpen, setRate, liveRate, alloc, openCat, setOpenCat, peak, resetPeak, priceMode, lastPriceTime, refresh, openHolding }) {
+  const [peakOpen, setPeakOpen] = useState(false);
+  // The stamp: the highest total Folio has seen on this iPhone
+  const peakToday = !!peak && new Date(peak.at).toDateString() === new Date().toDateString();
+  const atPeak = !!peak && grand.value >= peak.usd * 0.999;
+  const stampTitle = peak && atPeak && peakToday ? "New high" : "Peak";
+  const stampAmt = peak ? fu(peak.usd) : "…";
+  const stampSub = !peak ? "checking prices" : peakToday ? "today" : dayMonth(peak.at);
+  const below = peak ? Math.max(0, peak.usd - grand.value) : 0;
+  const pick = (g) => {
+    setOpenCat(g);
+    if (g) setTimeout(() => {
+      const el = document.getElementById(`cat-${g}`);
+      if (el) el.scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth", block: "nearest" });
+    }, 60);
+  };
   return (
     <>
       <header className="topbar">
@@ -724,12 +754,22 @@ function Overview({ grand, count, rate, rateManual, rateOpen, setRateOpen, setRa
         <div className="muted">Everything you own</div>
         <div className="total">${count.toLocaleString("en-US")}</div>
         <div className="muted big">{thb(grand.value * rate)}</div>
-        <div className="stamp" aria-label={`${stampTitle}: ${stampAmt}`}>
+        <button type="button" className="stamp" aria-expanded={peakOpen} onClick={() => setPeakOpen(!peakOpen)}
+          aria-label={`${stampTitle}: ${stampAmt}, ${stampSub}. Tap for details`}>
           <span className="stamp-t">{stampTitle}</span>
           <span className="stamp-n">{stampAmt}</span>
           <span className="stamp-s">{stampSub}</span>
-        </div>
+        </button>
       </section>
+      {peakOpen && peak && (
+        <div className="peak-panel">
+          <p>{atPeak
+            ? "You're at your highest total so far."
+            : `Your highest total was ${fu(peak.usd)} on ${dayMonth(peak.at)}. You're ${fu(below)} (${(below / peak.usd * 100).toFixed(1)}%) below it.`}</p>
+          <p className="muted small">Folio remembers the highest total it has seen on this iPhone. If a typo pushed it too high, start over from today's total.</p>
+          <button type="button" className="btn-line" onClick={() => { resetPeak(); setPeakOpen(false); }}>Start over from today</button>
+        </div>
+      )}
 
       <div className="pair">
         <div>
@@ -746,13 +786,13 @@ function Overview({ grand, count, rate, rateManual, rateOpen, setRateOpen, setRa
         <h2>Where your money is</h2>
         <span className="muted small">{alloc.length} {alloc.length === 1 ? "category" : "categories"}</span>
       </div>
-      <Donut alloc={alloc} />
+      <Donut alloc={alloc} selected={openCat} onSelect={pick} />
 
       <div className="list">
         {alloc.map((c) => {
           const open = openCat === c.g;
           return (
-            <div key={c.g} className="row-wrap">
+            <div key={c.g} id={`cat-${c.g}`} className="row-wrap">
               <button type="button" className="row" aria-expanded={open} onClick={() => setOpenCat(open ? null : c.g)}>
                 <CatMark g={c.g} color={c.color} />
                 <span className="row-main">
@@ -911,7 +951,7 @@ function Holdings({ holdings, groups, labelOf, renameGroup, rate, update, openHo
 
       <section className="block">
         <h2>All holdings</h2>
-        <p className="muted">Tap a holding to change units or cost, or to record a buy or sale. Tap the pencil to rename a category.</p>
+        <p className="muted">Tap a holding to change units or cost. Tap the pencil to rename a category.</p>
         <div className="list">
           {groups.map((g) => {
             const isOpen = open === g.g;
@@ -1002,20 +1042,9 @@ function Holdings({ holdings, groups, labelOf, renameGroup, rate, update, openHo
 // The sheet that slides up when you open a holding. Edits apply when you tap Done.
 function HoldingSheet({ start, isNew, labelOf, rate, prices, setP, fundP, setMode, setMissing, fundMode, fundMissing, fundError, onSave, onClose, onDelete }) {
   const [d, setD] = useState(start);
-  const [pending, setPending] = useState([]); // buys/sells to record when you tap Done
-  const [trade, setTrade] = useState(null);   // "buy" | "sell"
-  const [tUnits, setTUnits] = useState(0);
-  const [tAmt, setTAmt] = useState(0);
-  const [tErr, setTErr] = useState("");
-  const [ask, setAsk] = useState(null);       // { diff } — cost changed by hand, waiting for "new money?"
-  const [note, setNote] = useState(null);     // { text, flowId, ask }
   const up = (patch) => setD((x) => ({ ...x, ...patch }));
   const ccy = costCcy(d);
   const cf = costField(d);
-  const money = (amt) => (ccy === "THB" ? thb(amt) : fu(amt));
-  const toUSD = (amt) => (ccy === "THB" ? amt / (rate || 1) : amt);
-  const mkFlow = (amt) => ({ id: uid(), at: Date.now(), holdingId: d.id, name: String(d.name || "").trim() || "New asset", usd: round2(toUSD(amt)), thb: round2(ccy === "THB" ? amt : amt * (rate || 1)) });
-  const hasQty = d.type !== "manual";
   const val = usdValue(d, prices, rate, setP, fundP);
   const cost = hasCost(d, rate) ? usdCost(d, rate) : null;
   const pl = cost != null ? val - cost : null;
@@ -1028,57 +1057,6 @@ function HoldingSheet({ start, isNew, labelOf, rate, prices, setP, fundP, setMod
     return () => { document.removeEventListener("keydown", onKey); document.body.style.overflow = prev; };
     // eslint-disable-next-line
   }, []);
-
-  const unitWord = d.type === "live" ? (COINS[d.coin]?.unit || "units") : d.type === "set" ? "shares" : "units";
-  const openTrade = (kind) => { setTrade(trade === kind ? null : kind); setTUnits(0); setTAmt(0); setTErr(""); setAsk(null); };
-  const applyTrade = () => {
-    const amt = +tAmt || 0, u = +tUnits || 0;
-    if (amt <= 0 || (hasQty && u <= 0)) { setTErr(hasQty ? `Enter the ${unitWord} and the money.` : "Enter an amount."); return; }
-    const curCost = +d[cf] || 0;
-    let f;
-    if (trade === "buy") {
-      if (hasQty) up({ qty: +((+d.qty || 0) + u).toFixed(8), [cf]: round2(curCost + amt), unitsEstimated: false });
-      else up({ value: round2((+d.value || 0) + amt), cost: round2(curCost + amt), valueUpdatedAt: Date.now() });
-      f = mkFlow(amt);
-      setNote({ text: `Bought ${money(amt)}. It counts toward ${monthName()} when you tap Done.`, flowId: f.id });
-    } else {
-      if (hasQty) {
-        const q = +d.qty || 0;
-        if (u > q + 1e-9) { setTErr(`That's more than the ${num(q, 8)} ${unitWord} you hold.`); return; }
-        const left = Math.max(0, q - u);
-        up({ qty: +left.toFixed(8), [cf]: round2(q > 0 ? curCost * left / q : 0) });
-      } else {
-        const v = +d.value || 0;
-        if (amt > v + 1e-9) { setTErr(`That's more than the ${money(v)} it's worth.`); return; }
-        const left = Math.max(0, v - amt);
-        up({ value: round2(left), cost: round2(v > 0 ? curCost * left / v : 0), valueUpdatedAt: Date.now() });
-      }
-      f = mkFlow(-amt);
-      setNote({ text: `Sold ${money(amt)}. It's taken off ${monthName()} when you tap Done.`, flowId: f.id });
-    }
-    setPending((p) => [...p, f]);
-    setTrade(null); setTUnits(0); setTAmt(0); setTErr("");
-  };
-
-  const onCostCommit = (before, after) => {
-    const diff = round2((+after || 0) - (+before || 0));
-    if (Math.abs(diff) >= 0.01) { setAsk({ diff }); setNote(null); }
-  };
-  const answer = (yes) => {
-    if (yes) {
-      const f = mkFlow(ask.diff);
-      setPending((p) => [...p, f]);
-      setNote({ text: ask.diff > 0 ? `Counted as new money: ${money(ask.diff)}.` : `Counted as money taken out: ${money(ask.diff)}.`, flowId: f.id, ask });
-    } else {
-      setNote({ text: "Saved as a fix. Not counted as new money.", flowId: null, ask });
-    }
-    setAsk(null);
-  };
-  const undoNote = () => {
-    if (note && note.flowId) setPending((p) => p.filter((f) => f.id !== note.flowId));
-    if (note && note.ask) setAsk(note.ask);
-    setNote(null);
-  };
 
   const switchType = (type) => {
     if (type === "live") up({ type, coin: d.coin || "bitcoin", qty: d.qty || 0, costUSD: d.costUSD || 0 });
@@ -1096,7 +1074,6 @@ function HoldingSheet({ start, isNew, labelOf, rate, prices, setP, fundP, setMod
         estimateFromTHB: fromManual && +d.value > 0 ? toTHB(d.value) : undefined,
       });
     } else up({ type, ccy: d.ccy || "USD", cost: d.cost || 0, value: d.value || 0, valueUpdatedAt: Date.now() });
-    setAsk(null);
   };
 
   // One or two lines on where the price comes from
@@ -1139,7 +1116,7 @@ function HoldingSheet({ start, isNew, labelOf, rate, prices, setP, fundP, setMod
         <div className="sheet-bar">
           <button type="button" className="bar-btn" onClick={onClose}>Cancel</button>
           <div className="sheet-title">{title}</div>
-          <button type="button" className="bar-btn strong" onClick={() => onSave(d, pending)}>{isNew ? "Add" : "Done"}</button>
+          <button type="button" className="bar-btn strong" onClick={() => onSave(d)}>{isNew ? "Add" : "Done"}</button>
         </div>
 
         <div className="readout">
@@ -1175,17 +1152,17 @@ function HoldingSheet({ start, isNew, labelOf, rate, prices, setP, fundP, setMod
                     {Object.entries(COINS).map(([id, c]) => <option key={id} value={id}>{c.label}</option>)}
                   </select>)}
                 {field("f-qty", "Amount held", <NumInput id="f-qty" className="f-in" value={d.qty} onChange={(v) => up({ qty: v })} />)}
-                {moneyField("f-cost", "Cost", "costUSD", onCostCommit)}
+                {moneyField("f-cost", "Cost", "costUSD")}
               </>)}
               {d.type === "set" && (<>
                 {field("f-tk", "SET ticker", <input id="f-tk" className="f-in caps" value={d.ticker || ""} placeholder="e.g. DELTA" onChange={(e) => up({ ticker: e.target.value.toUpperCase() })} />)}
                 {field("f-qty", "Shares held", <NumInput id="f-qty" className="f-in" value={d.qty} onChange={(v) => up({ qty: v })} />)}
-                {moneyField("f-cost", "Cost", "costTHB", onCostCommit)}
+                {moneyField("f-cost", "Cost", "costTHB")}
               </>)}
               {d.type === "fund" && (<>
                 {field("f-code", "Fund code", <input id="f-code" className="f-in caps" value={d.fundCode || ""} placeholder="e.g. SCBRM3" onChange={(e) => up({ fundCode: e.target.value.toUpperCase() })} />)}
                 {field("f-qty", "Units held", <NumInput id="f-qty" className="f-in" value={d.qty} onChange={(v) => up({ qty: v, unitsEstimated: false, estimateFromTHB: undefined })} />)}
-                {moneyField("f-cost", "Cost", "costTHB", onCostCommit)}
+                {moneyField("f-cost", "Cost", "costTHB")}
               </>)}
               {d.type === "manual" && (<>
                 {field("f-ccy", "Currency",
@@ -1193,50 +1170,12 @@ function HoldingSheet({ start, isNew, labelOf, rate, prices, setP, fundP, setMod
                     <option value="USD">US dollar</option><option value="THB">Thai baht</option>
                   </select>)}
                 {moneyField("f-val", "Value now", "value")}
-                {moneyField("f-cost", "Cost", "cost", onCostCommit)}
+                {moneyField("f-cost", "Cost", "cost")}
               </>)}
             </div>
 
-            {ask && !isNew && (
-              <div className="card ask" role="group" aria-label="Is this new money?">
-                <div className="ask-q">{ask.diff > 0 ? `Cost went up by ${money(ask.diff)}. Is this new money?` : `Cost went down by ${money(ask.diff)}. Did you sell some?`}</div>
-                <div className="muted small">{ask.diff > 0 ? `New money counts toward Added in ${monthName()}. A fix doesn't.` : `A sale is taken off ${monthName()}. A fix isn't.`}</div>
-                <div className="two">
-                  <button type="button" className="btn-ink" onClick={() => answer(true)}>{ask.diff > 0 ? "Yes, I bought more" : "Yes, I sold some"}</button>
-                  <button type="button" className="btn-box" onClick={() => answer(false)}>No, just fixing it</button>
-                </div>
-              </div>
-            )}
-            {note && (
-              <div className="card note" role="status">
-                <span>{note.text}</span>
-                <button type="button" className="btn-text" onClick={undoNote}>Undo</button>
-              </div>
-            )}
-            {!ask && !note && <p className="muted small hint">{ccy === "THB" ? "Cost is what you paid in total, in baht." : "Cost is what you paid in total, in dollars."}</p>}
+            <p className="muted small hint">{ccy === "THB" ? "Cost is what you paid in total, in baht." : "Cost is what you paid in total, in dollars."}</p>
           </div>
-
-          {!isNew && (
-            <div>
-              <div className="two">
-                <button type="button" className={`btn-ink tall${trade === "buy" ? " pressed" : ""}`} aria-expanded={trade === "buy"} onClick={() => openTrade("buy")}><PlusIcon /> I bought more</button>
-                <button type="button" className={`btn-box tall${trade === "sell" ? " pressed" : ""}`} aria-expanded={trade === "sell"} onClick={() => openTrade("sell")}><MinusIcon /> I sold some</button>
-              </div>
-              {trade && (
-                <div className="card trade">
-                  {hasQty && field("t-units", trade === "buy" ? `${unitWord[0].toUpperCase()}${unitWord.slice(1)} bought` : `${unitWord[0].toUpperCase()}${unitWord.slice(1)} sold`,
-                    <NumInput id="t-units" className="f-in" value={tUnits} onChange={setTUnits} />)}
-                  {field("t-amt", trade === "buy" ? (hasQty ? "You paid" : "Amount added") : (hasQty ? "You got" : "Amount taken out"),
-                    <span className="f-money"><span className="muted" aria-hidden="true">{ccy === "THB" ? "฿" : "$"}</span><NumInput id="t-amt" className="f-in" value={tAmt} onChange={setTAmt} /></span>)}
-                  {tErr && <div className="warn small pad">{tErr}</div>}
-                  <div className="pad">
-                    <button type="button" className="btn-ink full" onClick={applyTrade}>{trade === "buy" ? "Add to this holding" : "Take off this holding"}</button>
-                  </div>
-                </div>
-              )}
-              {!trade && <p className="muted small hint">Type the {hasQty ? `${unitWord} and the money` : "amount"}. Folio updates your totals and counts it toward {monthName()}.</p>}
-            </div>
-          )}
 
           <div>
             <button type="button" className="btn-box full loss" onClick={() => (isNew ? onClose() : onDelete(d.id))}>{isNew ? "Discard" : "Delete holding"}</button>
@@ -1253,7 +1192,6 @@ const OverviewIcon = () => <svg width="24" height="24" viewBox="0 0 24 24" strok
 const GainsIcon = () => <svg width="24" height="24" viewBox="0 0 24 24" strokeWidth="1.8" {...svgP}><path d="M3 17l6-6 4 4 8-8" /><path d="M15 7h6v6" /></svg>;
 const ListIcon = () => <svg width="24" height="24" viewBox="0 0 24 24" strokeWidth="1.8" {...svgP}><path d="M8 6h13" /><path d="M8 12h13" /><path d="M8 18h13" /><path d="M3.5 6h.01" /><path d="M3.5 12h.01" /><path d="M3.5 18h.01" /></svg>;
 const PlusIcon = () => <svg width="16" height="16" viewBox="0 0 16 16" strokeWidth="2" {...svgP}><path d="M8 3v10" /><path d="M3 8h10" /></svg>;
-const MinusIcon = () => <svg width="16" height="16" viewBox="0 0 16 16" strokeWidth="2" {...svgP}><path d="M3 8h10" /></svg>;
 const PencilIcon = () => <svg width="17" height="17" viewBox="0 0 16 16" strokeWidth="1.5" {...svgP}><path d="M11 2.5l2.5 2.5L6 12.5 3 13l.5-3z" /></svg>;
 const RefreshIcon = () => <svg width="16" height="16" viewBox="0 0 16 16" strokeWidth="1.6" {...svgP}><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" /><path d="M13.5 2.5v3h-3" /></svg>;
 const UploadIcon = () => <svg width="18" height="18" viewBox="0 0 20 20" strokeWidth="1.6" {...svgP}><path d="M10 13V3" /><path d="M6 7l4-4 4 4" /><path d="M4 11v5h12v-5" /></svg>;
@@ -1294,7 +1232,7 @@ const CSS = `
 
 .hero { position:relative; padding:20px 0 22px; }
 .total { font-size:46px; font-weight:600; letter-spacing:-1px; line-height:1.1; margin-top:6px; }
-.stamp { position:absolute; right:2px; top:22px; transform:rotate(-6deg); border:2px solid var(--ink); outline:1px solid var(--ink); outline-offset:-6px; opacity:.8; border-radius:10px; padding:9px 14px; display:flex; flex-direction:column; align-items:center; max-width:150px; text-align:center; }
+.stamp { background:transparent; color:var(--ink); font:inherit; position:absolute; right:2px; top:22px; transform:rotate(-6deg); border:2px solid var(--ink); outline:1px solid var(--ink); outline-offset:-6px; opacity:.8; border-radius:10px; padding:9px 14px; display:flex; flex-direction:column; align-items:center; max-width:150px; text-align:center; }
 .stamp-t { font-size:11px; font-weight:600; }
 .stamp-n { font-size:22px; font-weight:700; line-height:1.15; }
 .stamp-s { font-size:11px; font-weight:500; }
@@ -1309,8 +1247,14 @@ const CSS = `
 .sec-head h2, .block h2 { font-size:18px; font-weight:600; }
 .h-small { font-size:16px !important; }
 
-.donut { margin:12px auto 18px; width:230px; height:230px; border-radius:50%; position:relative; }
-.donut-hole { position:absolute; inset:36px; border-radius:50%; background:var(--paper); display:flex; flex-direction:column; align-items:center; justify-content:center; }
+.donut-wrap { position:relative; width:240px; margin:8px auto 10px; }
+.donut { display:block; width:240px; height:240px; overflow:visible; }
+.donut .seg { cursor:pointer; transition:opacity .2s ease; }
+.donut-hole { position:absolute; left:50%; top:120px; transform:translate(-50%,-50%); width:132px; pointer-events:none; display:flex; flex-direction:column; align-items:center; text-align:center; }
+.donut-wrap > p { margin-top:2px; }
+.peak-panel { margin-bottom:16px; padding:14px; background:var(--field); border-radius:12px; display:flex; flex-direction:column; gap:6px; align-items:flex-start; }
+.peak-panel p { font-size:15px; }
+.peak-panel .muted.small { font-size:13px; }
 .donut-name { font-size:24px; font-weight:600; line-height:1.2; max-width:130px; text-align:center; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
 .list { display:flex; flex-direction:column; }
@@ -1367,9 +1311,7 @@ const CSS = `
 .btn-ink { border:0; background:var(--ink); color:var(--bar) !important; }
 .btn-line { min-height:44px; border:1px solid var(--chip-line); background:transparent; font-size:14px; }
 .page-head .btn-ink { min-height:44px; border-radius:22px; padding:0 16px 0 12px; }
-.tall { min-height:52px; font-size:16px; }
 .full { width:100%; }
-.pressed { outline:2px solid var(--ink); outline-offset:2px; }
 .danger { padding-top:40px; }
 
 .tabbar { position:fixed; left:0; right:0; bottom:0; z-index:20; background:var(--bar); border-top:1px solid var(--line); display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); padding:4px 12px max(6px, calc(env(safe-area-inset-bottom) - 16px)); }
@@ -1401,14 +1343,7 @@ select.f-in { text-align-last:right; color:var(--ink2); }
 .f-money { flex:1 1 auto; display:flex; justify-content:flex-end; align-items:center; gap:2px; min-width:0; }
 .f-money .f-in { flex:0 1 150px; width:150px; }
 .hint { padding:6px 4px 0; }
-.trade { margin-top:10px; }
 .pad { padding:10px 16px 14px; }
-.ask { margin-top:10px; padding:14px; border:1px solid var(--field-line); gap:4px; }
-.ask-q { font-size:16px; font-weight:600; }
-.ask .two { margin-top:10px; gap:8px; }
-.ask .btn-ink, .ask .btn-box { min-height:46px; border-radius:10px; font-size:14px; padding:0 8px; white-space:nowrap; }
-.note { margin-top:10px; padding:4px 8px 4px 14px; flex-direction:row; align-items:center; gap:10px; border:1px solid var(--line); font-size:14px; }
-.note > span { flex:1 1 auto; padding:8px 0; }
 
 @media (prefers-reduced-motion: reduce) { .sheet { animation:none; } }
 `;
