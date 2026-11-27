@@ -786,11 +786,7 @@ function Overview({ grand, count, rate, rateManual, rateOpen, setRateOpen, setRa
         </div>
       </div>
 
-      <div className="sec-head">
-        <h2>Prices now</h2>
-        <span className="muted small">{priceMode === "offline" ? "Offline, last saved" : "Change in 24 hours"}</span>
-      </div>
-      <div className="market">
+      <div className="market" role="group" aria-label="Live prices, with the change over 24 hours">
         {Object.entries(COINS).map(([id, c]) => {
           const chg = changes[id];
           const m = COIN_MARK[id] || {};
@@ -1263,7 +1259,7 @@ const CSS = `
 .pair > div { padding:14px 0; min-width:0; }
 .pair > div + div { padding-left:16px; border-left:1px solid var(--line); }
 .pair-n { font-size:18px; font-weight:600; margin-top:2px; }
-.market { border-top:1px solid var(--line); border-bottom:1px solid var(--line); display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); }
+.market { border-bottom:1px solid var(--line); display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); }
 .mkt { padding:12px 0 12px 10px; min-width:0; display:flex; flex-direction:column; gap:3px; }
 .mkt:first-child { padding-left:0; }
 .mkt + .mkt { border-left:1px solid var(--line); }
