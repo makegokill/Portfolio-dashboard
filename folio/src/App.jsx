@@ -106,6 +106,7 @@ const costField = (h) => (h.type === "live" ? "costUSD" : h.type === "set" || h.
 const costCcy = (h) => (h.type === "live" ? "USD" : h.type === "set" || h.type === "fund" ? "THB" : h.ccy === "THB" ? "THB" : "USD");
 
 const MINUS = "−";
+const coinPrice = (v) => (v == null ? "…" : v < 10 ? "$" + v.toFixed(3) : "$" + Math.round(v).toLocaleString("en-US"));
 const fu = (v) => "$" + Math.round(Math.abs(v)).toLocaleString("en-US");
 const thb = (v) => "฿" + Math.round(Math.abs(v)).toLocaleString("en-US");
 const signed = (v) => (v >= 0 ? "+" : MINUS) + fu(v);
@@ -573,7 +574,8 @@ export default function App() {
             grand={GRAND} count={count} rate={rate} rateManual={rateManual} rateOpen={rateOpen} setRateOpen={setRateOpen}
             setRate={(v) => { if (v > 0) { setRateManual(true); setRate(v); } }} liveRate={() => setRateManual(false)}
             alloc={alloc} openCat={openCat} setOpenCat={setOpenCat} peak={peak} resetPeak={resetPeak}
-            priceMode={priceMode} lastPriceTime={lastPriceTime} refresh={refreshAll} openHolding={openHolding} />
+            priceMode={priceMode} lastPriceTime={lastPriceTime} refresh={refreshAll} openHolding={openHolding}
+            prices={prices} changes={changes} />
         )}
         {tab === "gains" && <Gains groups={groups} grand={GRAND} openHolding={openHolding} />}
         {tab === "holdings" && (
@@ -639,6 +641,8 @@ function NumInput({ value, onChange, onCommit, className, style, id, ariaLabel }
       }} />
   );
 }
+
+const COIN_MARK = { bitcoin: { g: "BTC" }, "pax-gold": { g: "Gold" }, ethereum: { color: "#627EEA" }, dogecoin: { color: "#C2A633" } };
 
 // Category marker: the Bitcoin and gold coins, or a small colour square
 function CatMark({ g, color }) {
@@ -715,7 +719,7 @@ const dayMonth = (t) => {
   return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", ...(d.getFullYear() === new Date().getFullYear() ? {} : { year: "numeric" }) });
 };
 
-function Overview({ grand, count, rate, rateManual, rateOpen, setRateOpen, setRate, liveRate, alloc, openCat, setOpenCat, peak, resetPeak, priceMode, lastPriceTime, refresh, openHolding }) {
+function Overview({ grand, count, rate, rateManual, rateOpen, setRateOpen, setRate, liveRate, alloc, openCat, setOpenCat, peak, resetPeak, priceMode, lastPriceTime, refresh, openHolding, prices, changes }) {
   const [peakOpen, setPeakOpen] = useState(false);
   // The stamp: the highest total Folio has seen on this iPhone
   const peakToday = !!peak && new Date(peak.at).toDateString() === new Date().toDateString();
@@ -780,6 +784,24 @@ function Overview({ grand, count, rate, rateManual, rateOpen, setRateOpen, setRa
           <div className="muted small">Since you bought</div>
           <div className="pair-n" style={{ color: tone(grand.pl) }}>{signed(grand.pl)} <span className="pair-p">({pctTxt(grand.plPct)})</span></div>
         </div>
+      </div>
+
+      <div className="sec-head">
+        <h2>Prices now</h2>
+        <span className="muted small">{priceMode === "offline" ? "Offline, last saved" : "Change in 24 hours"}</span>
+      </div>
+      <div className="market">
+        {Object.entries(COINS).map(([id, c]) => {
+          const chg = changes[id];
+          const m = COIN_MARK[id] || {};
+          return (
+            <div key={id} className="mkt">
+              <div className="mkt-sym"><CatMark g={m.g} color={m.color} /><span>{id === "pax-gold" ? "Gold" : c.label}</span></div>
+              <div className="mkt-p">{coinPrice(prices[id])}{id === "pax-gold" && <span className="mkt-u">/oz</span>}</div>
+              <div className="mkt-c" style={{ color: typeof chg === "number" ? tone(chg) : undefined }}>{typeof chg === "number" ? pctTxt(chg) : "–"}</div>
+            </div>
+          );
+        })}
       </div>
 
       <div className="sec-head">
@@ -1241,6 +1263,15 @@ const CSS = `
 .pair > div { padding:14px 0; min-width:0; }
 .pair > div + div { padding-left:16px; border-left:1px solid var(--line); }
 .pair-n { font-size:18px; font-weight:600; margin-top:2px; }
+.market { border-top:1px solid var(--line); border-bottom:1px solid var(--line); display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); }
+.mkt { padding:12px 0 12px 10px; min-width:0; display:flex; flex-direction:column; gap:3px; }
+.mkt:first-child { padding-left:0; }
+.mkt + .mkt { border-left:1px solid var(--line); }
+.mkt-sym { display:flex; align-items:center; gap:6px; font-size:13px; font-weight:600; color:var(--ink2); }
+.mkt-sym .mark { width:18px; height:18px; }
+.mkt-p { font-size:15px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.mkt-u { font-size:12px; font-weight:500; color:var(--ink2); }
+.mkt-c { font-size:13px; font-weight:500; color:var(--ink2); }
 .pair-p { font-size:14px; font-weight:500; }
 
 .sec-head { padding:28px 0 6px; display:flex; align-items:baseline; justify-content:space-between; }
